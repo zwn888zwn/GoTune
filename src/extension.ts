@@ -2,18 +2,18 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { isRuntimeHotspot } from './classify';
 import { compareProfiles } from './compare';
 import { analyzeEscapes, resolveSourceFile } from './escape';
 import { isMainGoSource } from './goSource';
 import { GoroutineTracker } from './goroutine';
+import { buildProfileInsights } from './insights';
 import { analyzeMemoryTrend } from './memoryTrend';
 import { CallNode, Hotspot, ProfileSession, RuntimeMetrics } from './model';
 import { listProfileSampleTypes, parseProfile } from './profileParser';
 import { buildProfileUrl } from './profileUrl';
 import { discoverMainPackages, MainPackage, ProfilerRunner, resolveMainPackage } from './runner';
 import { TraceViewer } from './traceViewer';
-import { HotspotItem, PerformanceTreeProvider, runningItems, SessionItem } from './views';
+import { FindingItem, HotspotItem, PerformanceTreeProvider, runningItems, SessionItem } from './views';
 import {
   formatValue,
   showComparisonPanel,
@@ -26,12 +26,12 @@ import {
 const sessions: ProfileSession[] = [];
 let activeSession: ProfileSession | undefined;
 let baselineSessionId: string | undefined;
-let hideRuntimeFindings = true;
 const memoryGrowthSessions: ProfileSession[] = [];
 
 const sessionsStorageKey = 'gotune.sessions.v1';
 const activeSessionStorageKey = 'gotune.activeSession.v1';
 const baselineStorageKey = 'gotune.baselineSession.v1';
+const advancedToolsStorageKey = 'gotune.advancedToolsVisible.v1';
 
 interface RemoteProfileTarget {
   label: string;
@@ -63,10 +63,14 @@ class HotspotCodeLensProvider implements vscode.CodeLensProvider {
       .slice(0, 30)
       .map((hotspot) => {
         const line = Math.max(0, Math.min(document.lineCount - 1, hotspot.location!.line - 1));
-        const percent = activeSession!.total === 0 ? 0 : hotspot.cumulative / activeSession!.total * 100;
+        const flatPercent = activeSession!.total === 0 ? 0 : hotspot.flat / activeSession!.total * 100;
+        const cumulativePercent = activeSession!.total === 0 ? 0 : hotspot.cumulative / activeSession!.total * 100;
+        const allocation = /^alloc_/.test(activeSession!.sampleType);
         return new vscode.CodeLens(document.lineAt(line).range, {
-          command: 'gotune.analyzeEscape',
-          title: `GoTune: ${percent.toFixed(1)}% cumulative · analyze escapes`,
+          command: allocation ? 'gotune.analyzeEscape' : 'gotune.showCurrentFunctionInProfile',
+          title: allocation
+            ? `GoTune Alloc: ${formatValue(hotspot.flat, activeSession!.sampleUnit)} self · analyze escapes`
+            : `GoTune ${profileKindLabel(activeSession!.sampleType)}: ${flatPercent.toFixed(1)}% self · ${cumulativePercent.toFixed(1)}% with callees`,
           arguments: [new HotspotItem(hotspot, activeSession!)]
         });
       });
@@ -87,6 +91,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const targetOutput = vscode.window.createOutputChannel('GoTune Target');
   const runner = new ProfilerRunner(targetOutput);
   const traceViewer = new TraceViewer(targetOutput);
+  let advancedToolsVisible = context.workspaceState.get<boolean>(advancedToolsStorageKey, false);
   let runtimeOverviewPanel: vscode.WebviewPanel | undefined;
   let runtimeOverviewTimer: NodeJS.Timeout | undefined;
   let runtimeOverviewPolling = false;
@@ -94,8 +99,8 @@ export function activate(context: vscode.ExtensionContext): void {
   const codeLensProvider = new HotspotCodeLensProvider();
   const runningProvider = new PerformanceTreeProvider(() => runningItems(
     runner.snapshot,
-    vscode.workspace.getConfiguration('gotune').get<boolean>('enableContentionProfiles', false),
-    memoryGrowthSessions.length
+    memoryGrowthSessions.length,
+    advancedToolsVisible
   ));
   const sessionProvider = new PerformanceTreeProvider(() => sessions.map((session) => {
     const state = session.id === baselineSessionId
@@ -103,12 +108,10 @@ export function activate(context: vscode.ExtensionContext): void {
       : session.id === activeSession?.id ? 'current' : 'normal';
     return new SessionItem(session, state);
   }));
-  const findingsProvider = new PerformanceTreeProvider(() =>
-    (activeSession?.hotspots ?? [])
-      .filter((hotspot) => !hideRuntimeFindings || !isRuntimeHotspot(hotspot))
-      .slice(0, 100)
-      .map((hotspot) => new HotspotItem(hotspot, activeSession!))
-  );
+  const findingsProvider = new PerformanceTreeProvider(() => {
+    if (!activeSession) return [];
+    return buildProfileInsights(activeSession).map((insight) => new FindingItem(insight, activeSession!));
+  });
   const heatDecoration = vscode.window.createTextEditorDecorationType({
     isWholeLine: true,
     backgroundColor: new vscode.ThemeColor('editor.wordHighlightBackground'),
@@ -142,6 +145,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('gotune.enableContentionProfiles')) {
         runningProvider.refresh();
+      }
+    }),
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
+      if (editor?.document.languageId === 'go') {
+        applyProfileHeatToEditor(editor, heatDecoration, heatLabelDecoration);
       }
     }),
     vscode.window.registerTreeDataProvider('gotune.running', runningProvider),
@@ -241,6 +249,11 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showInformationMessage(
         `GoTune: Contention profiling ${!current ? 'enabled' : 'disabled'} in User Settings.${restart}`
       );
+    }),
+    vscode.commands.registerCommand('gotune.toggleAdvancedTools', () => {
+      advancedToolsVisible = !advancedToolsVisible;
+      void context.workspaceState.update(advancedToolsStorageKey, advancedToolsVisible);
+      runningProvider.refresh();
     }),
     vscode.commands.registerCommand('gotune.captureCpu', async () => {
       const seconds = vscode.workspace.getConfiguration('gotune').get<number>('captureCpuSeconds', 10);
@@ -449,23 +462,37 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showInformationMessage('GoTune: Import or fetch a profile first.');
         return;
       }
-      showProfilePanel(activeSession, (file, line) => void openSource(file, line, heatDecoration, heatLabelDecoration));
+      showSessionProfile(activeSession);
     }),
-    vscode.commands.registerCommand('gotune.showSource', async (item?: HotspotItem) => {
+    vscode.commands.registerCommand('gotune.showCurrentFunctionInProfile', async (item?: HotspotItem) => {
+      if (!activeSession) {
+        void vscode.window.showInformationMessage('GoTune: Capture or import a profile first.');
+        return;
+      }
+      const hotspot = item?.hotspot ?? await hotspotAtEditor();
+      if (!hotspot) {
+        void vscode.window.showInformationMessage(
+          'GoTune: The current function has no samples in the active profile.'
+        );
+        return;
+      }
+      showSessionProfile(activeSession, hotspot);
+    }),
+    vscode.commands.registerCommand('gotune.showSource', async (item?: { hotspot?: Hotspot }) => {
       const hotspot = item?.hotspot;
       if (!hotspot?.location) return;
       await openSource(hotspot.location.file, hotspot.location.line, heatDecoration, heatLabelDecoration);
     }),
     vscode.commands.registerCommand('gotune.analyzeEscape', async (item?: HotspotItem) => {
-      const hotspot = item?.hotspot ?? hotspotAtEditor();
-      await analyzeEscapes(hotspot, activeSession, diagnostics);
-    }),
-    vscode.commands.registerCommand('gotune.toggleRuntimeFindings', () => {
-      hideRuntimeFindings = !hideRuntimeFindings;
-      updateContexts();
-      findingsProvider.refresh();
-      void vscode.window.showInformationMessage(
-        `GoTune: Runtime findings are now ${hideRuntimeFindings ? 'hidden' : 'visible'}.`
+      const hotspot = item?.hotspot ?? await hotspotAtEditor();
+      const execution = resolveGoExecutionConfiguration();
+      await analyzeEscapes(
+        hotspot,
+        activeSession,
+        diagnostics,
+        execution.goExecutable,
+        execution.environment,
+        execution.buildFlags
       );
     }),
     vscode.commands.registerCommand('gotune.setBaseline', (item?: SessionItem) => {
@@ -522,6 +549,11 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   updateContexts();
   void vscode.commands.executeCommand('setContext', 'gotune.targetActive', false);
+  for (const editor of vscode.window.visibleTextEditors) {
+    if (editor.document.languageId === 'go') {
+      applyProfileHeatToEditor(editor, heatDecoration, heatLabelDecoration);
+    }
+  }
 
   function addSession(session: ProfileSession, showResult = true): void {
     sessions.unshift(session);
@@ -539,21 +571,53 @@ export function activate(context: vscode.ExtensionContext): void {
     sessionProvider.refresh();
     findingsProvider.refresh();
     codeLensProvider.refresh();
+    for (const editor of vscode.window.visibleTextEditors) {
+      if (editor.document.languageId === 'go') {
+        applyProfileHeatToEditor(editor, heatDecoration, heatLabelDecoration);
+      }
+    }
   }
 
-  function hotspotAtEditor(): Hotspot | undefined {
+  async function hotspotAtEditor(): Promise<Hotspot | undefined> {
     const editor = vscode.window.activeTextEditor;
     if (!editor || !activeSession) return undefined;
-    const line = editor.selection.active.line + 1;
-    return activeSession.hotspots
-      .filter((hotspot) => hotspot.location && sameSource(editor.document.uri.fsPath, hotspot.location.file))
-      .sort((left, right) => Math.abs((left.location?.line ?? 0) - line) - Math.abs((right.location?.line ?? 0) - line))[0];
+    const candidates = activeSession.hotspots.filter(
+      (hotspot) => hotspot.location && sameSource(editor.document.uri.fsPath, hotspot.location.file)
+    );
+    const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+      'vscode.executeDocumentSymbolProvider',
+      editor.document.uri
+    );
+    const functions: vscode.DocumentSymbol[] = [];
+    const visit = (items: vscode.DocumentSymbol[]): void => {
+      for (const item of items) {
+        if (item.kind === vscode.SymbolKind.Function || item.kind === vscode.SymbolKind.Method) {
+          functions.push(item);
+        }
+        visit(item.children);
+      }
+    };
+    visit(symbols ?? []);
+    const currentFunction = functions
+      .filter((symbol) => symbol.range.contains(editor.selection.active))
+      .sort((left, right) => {
+        const leftSize = left.range.end.line - left.range.start.line;
+        const rightSize = right.range.end.line - right.range.start.line;
+        return leftSize - rightSize;
+      })[0];
+    if (!currentFunction) return undefined;
+    return candidates
+      .filter((hotspot) => {
+        const line = Math.max(0, (hotspot.location?.line ?? 1) - 1);
+        return currentFunction.range.contains(new vscode.Position(line, 0));
+      })
+      .sort((left, right) => right.cumulative - left.cumulative)[0];
   }
 
   function updateContexts(): void {
     void vscode.commands.executeCommand('setContext', 'gotune.hasActiveProfile', Boolean(activeSession));
     void vscode.commands.executeCommand('setContext', 'gotune.hasBaseline', Boolean(baselineSessionId));
-    void vscode.commands.executeCommand('setContext', 'gotune.hideRuntimeFindings', hideRuntimeFindings);
+    void vscode.commands.executeCommand('setContext', 'gotune.activeProfileKind', profileKind(activeSession?.sampleType));
   }
 
   function persist(): void {
@@ -616,6 +680,10 @@ export function activate(context: vscode.ExtensionContext): void {
       );
       const timestamp = new Date().toLocaleTimeString();
       const session = parseProfile(bytes, `${label} ${timestamp}`, profileUrl, preferredSampleType);
+      const durationMatch = /(?:^|[?&])seconds=(\d+)/.exec(profileUrl);
+      session.target = runner.snapshot.target?.importPath;
+      session.processStartedAt = runner.snapshot.startedAt;
+      session.captureDurationMs = durationMatch ? Number(durationMatch[1]) * 1000 : undefined;
       addSession(session, showResult);
       if (session.sampleType === 'cpu' && session.total === 0) {
         void vscode.window.showWarningMessage(
@@ -664,6 +732,43 @@ export function activate(context: vscode.ExtensionContext): void {
     return goroutineTracker.capture(bytes.toString('utf8'));
   }
 
+  function showSessionProfile(session: ProfileSession, focusedHotspot?: Hotspot): void {
+    const baseline = sessions.find((candidate) => candidate.id === baselineSessionId);
+    const baselineState = baseline?.id === session.id
+      ? 'current'
+      : baseline?.sampleType === session.sampleType && baseline.sampleUnit === session.sampleUnit
+        ? 'available'
+        : 'none';
+    showProfilePanel(
+      session,
+      (file, line) => void openSource(file, line, heatDecoration, heatLabelDecoration),
+      focusedHotspot,
+      (action, hotspot) => {
+        if (action === 'escape') {
+          void vscode.commands.executeCommand(
+            'gotune.analyzeEscape',
+            hotspot ? new HotspotItem(hotspot, session) : undefined
+          );
+        } else if (action === 'baseline') {
+          void vscode.commands.executeCommand('gotune.setBaseline', new SessionItem(session));
+        } else if (action === 'compare') {
+          void vscode.commands.executeCommand('gotune.compareWithBaseline', new SessionItem(session));
+        } else {
+          const kind = profileKind(session.sampleType);
+          const command = kind === 'allocation'
+            ? 'gotune.captureAllocations'
+            : kind === 'memory'
+              ? 'gotune.checkMemoryGrowth'
+              : kind === 'blocking'
+                ? (/mutex/i.test(`${session.sampleType} ${session.name}`) ? 'gotune.captureMutex' : 'gotune.captureBlock')
+                : 'gotune.captureCpu';
+          void vscode.commands.executeCommand(command);
+        }
+      },
+      baselineState
+    );
+  }
+
   function closeRuntimeOverview(): void {
     if (runtimeOverviewTimer) clearInterval(runtimeOverviewTimer);
     runtimeOverviewTimer = undefined;
@@ -696,7 +801,16 @@ async function openSource(
     editor.setDecorations(heatLabelDecoration, []);
     return;
   }
+  applyProfileHeatToEditor(editor, heatDecoration, heatLabelDecoration);
+}
 
+function applyProfileHeatToEditor(
+  editor: vscode.TextEditor,
+  heatDecoration: vscode.TextEditorDecorationType,
+  heatLabelDecoration: vscode.TextEditorDecorationType
+): void {
+  const document = editor.document;
+  const uri = document.uri;
   const metrics = activeSession?.lineMetrics.filter((metric) => sameSource(uri.fsPath, metric.file)) ?? [];
   const max = Math.max(...metrics.map((metric) => metric.value), 1);
   const lineDecorations = metrics.map((metric) => {
@@ -704,7 +818,14 @@ async function openSource(
     const percent = activeSession?.total ? metric.value / activeSession.total * 100 : 0;
     return {
       range: document.lineAt(metricLine).range,
-      hoverMessage: `$(flame) **${metric.functionName}**\n\n${formatValue(metric.value, activeSession?.sampleUnit ?? '')} (${percent.toFixed(1)}% of profile)`
+      hoverMessage: [
+        `$(flame) **${metric.functionName}**`,
+        '',
+        `Self: ${metric.flat === undefined ? 'not recorded in this saved session' : formatValue(metric.flat, activeSession?.sampleUnit ?? '')}`,
+        `With callees: ${formatValue(metric.value, activeSession?.sampleUnit ?? '')} (${percent.toFixed(1)}% of profile)`,
+        '',
+        '_With callees includes samples spent in functions called from this line._'
+      ].join('\n\n')
     };
   });
   const labels = metrics.map((metric) => {
@@ -714,7 +835,10 @@ async function openSource(
     return {
       range: new vscode.Range(lineRange.end, lineRange.end),
       renderOptions: {
-        after: { contentText: ` GoTune ${percent.toFixed(1)}%`, opacity: String(0.45 + 0.55 * metric.value / max) }
+        after: {
+          contentText: ` GoTune ${percent.toFixed(1)}% with callees`,
+          opacity: String(0.45 + 0.55 * metric.value / max)
+        }
       }
     };
   });
@@ -727,6 +851,22 @@ function sameSource(left: string, right: string): boolean {
   const a = normalize(left);
   const b = normalize(right);
   return a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
+}
+
+function profileKind(sampleType?: string): 'cpu' | 'allocation' | 'memory' | 'blocking' | 'other' {
+  if (sampleType === 'cpu') return 'cpu';
+  if (sampleType && /^alloc_/.test(sampleType)) return 'allocation';
+  if (sampleType && /^inuse_/.test(sampleType)) return 'memory';
+  if (sampleType && /delay|contentions|mutex|block/i.test(sampleType)) return 'blocking';
+  return 'other';
+}
+
+function profileKindLabel(sampleType: string): string {
+  const kind = profileKind(sampleType);
+  if (kind === 'cpu') return 'CPU';
+  if (kind === 'memory') return 'Heap';
+  if (kind === 'blocking') return 'Wait';
+  return 'Profile';
 }
 
 function fetchBuffer(url: string, redirects = 0, timeoutOverrideMs?: number): Promise<Buffer> {

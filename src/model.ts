@@ -22,7 +22,10 @@ export interface CallNode {
 export interface LineMetric {
   file: string;
   line: number;
+  /** Cumulative sample value for stacks passing through this source line. */
   value: number;
+  /** Sample value spent directly in this source line. */
+  flat?: number;
   functionName: string;
 }
 
@@ -34,6 +37,9 @@ export interface ProfileSession {
   sampleType: string;
   sampleUnit: string;
   total: number;
+  target?: string;
+  captureDurationMs?: number;
+  processStartedAt?: number;
   hotspots: Hotspot[];
   callTree: CallNode[];
   lineMetrics: LineMetric[];
@@ -54,6 +60,7 @@ export interface ProfileComparison {
   current: ProfileSession;
   totalDelta: number;
   totalDeltaPercent?: number;
+  warnings: string[];
   entries: ComparisonEntry[];
 }
 

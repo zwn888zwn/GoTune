@@ -120,16 +120,15 @@ function displayName(fullName: string): string {
   return fullName.slice(packageStart);
 }
 
-function locationFor(location: LocationInfo, functions: Map<bigint, FunctionInfo>): [FunctionInfo, SourceLocation | undefined] | undefined {
-  const line = location.lines[0];
-  if (!line) {
-    return undefined;
-  }
-  const fn = functions.get(line.functionId);
-  if (!fn) {
-    return undefined;
-  }
-  return [fn, fn.file ? { file: fn.file, line: line.line } : undefined];
+function framesFor(
+  location: LocationInfo,
+  functions: Map<bigint, FunctionInfo>
+): Array<[FunctionInfo, SourceLocation | undefined]> {
+  return location.lines.flatMap((line) => {
+    const fn = functions.get(line.functionId);
+    if (!fn) return [];
+    return [[fn, fn.file ? { file: fn.file, line: line.line } : undefined]];
+  });
 }
 
 function decodeProfile(input: Buffer): { profileFields: Field[]; strings: string[] } {
@@ -239,11 +238,11 @@ export function parseProfile(
     const stack = sample.locations
       .map((id) => locations.get(id))
       .filter((location): location is LocationInfo => Boolean(location))
-      .map((location) => ({ location, resolved: locationFor(location, functions) }))
-      .filter((entry): entry is { location: LocationInfo; resolved: [FunctionInfo, SourceLocation | undefined] } => Boolean(entry.resolved));
+      .flatMap((location) => framesFor(location, functions))
+      .map(([fn, sourceLocation]) => ({ fn, sourceLocation }));
 
     stack.forEach((entry, index) => {
-      const [fn, sourceLocation] = entry.resolved;
+      const { fn, sourceLocation } = entry;
       const current = totals.get(fn.id) ?? { name: fn.name, flat: 0, cumulative: 0, location: sourceLocation };
       current.cumulative += value;
       if (index === 0) {
@@ -257,16 +256,20 @@ export function parseProfile(
           file: sourceLocation.file,
           line: sourceLocation.line,
           value: 0,
+          flat: 0,
           functionName: fn.name
         };
         metric.value += value;
+        if (index === 0) {
+          metric.flat = (metric.flat ?? 0) + value;
+        }
         lineTotals.set(key, metric);
       }
     });
 
     let parent = root;
     for (const entry of [...stack].reverse()) {
-      const [fn, sourceLocation] = entry.resolved;
+      const { fn, sourceLocation } = entry;
       const id = fn.id.toString();
       let node = parent.children.find((candidate) => candidate.id === id);
       if (!node) {

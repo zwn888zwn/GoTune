@@ -3,7 +3,9 @@ import { isRuntimeFunction, isRuntimeHotspot, isRuntimeLine } from './classify';
 import { GoroutineSnapshot } from './goroutine';
 import { buildProfileInsights, profileMeaning } from './insights';
 import { MemoryTrend } from './memoryTrend';
-import { CallNode, ProfileComparison, ProfileSession } from './model';
+import { CallNode, Hotspot, ProfileComparison, ProfileSession } from './model';
+
+export type ProfileAction = 'escape' | 'baseline' | 'compare' | 'recapture';
 
 export function formatValue(value: number, unit: string): string {
   if (unit === 'nanoseconds') {
@@ -155,7 +157,13 @@ export function showRuntimeOverviewPanel(
   return panel;
 }
 
-export function showProfilePanel(session: ProfileSession, onOpenSource: (file: string, line: number) => void): void {
+export function showProfilePanel(
+  session: ProfileSession,
+  onOpenSource: (file: string, line: number) => void,
+  focusedHotspot?: Hotspot,
+  onAction?: (action: ProfileAction, hotspot: Hotspot | undefined) => void,
+  baselineState: 'none' | 'current' | 'available' = 'none'
+): void {
   const panel = vscode.window.createWebviewPanel(
     'gotune.profile',
     `GoTune: ${session.name}`,
@@ -165,7 +173,15 @@ export function showProfilePanel(session: ProfileSession, onOpenSource: (file: s
   const nonce = Math.random().toString(36).slice(2);
   const mappedHotspots = session.hotspots.filter((hotspot) => hotspot.location).length;
   const hottest = session.hotspots[0];
+  const actionHotspot = focusedHotspot
+    ?? session.hotspots.find((hotspot) => hotspot.location && !isRuntimeHotspot(hotspot))
+    ?? hottest;
   const insights = buildProfileInsights(session);
+  const kind = /^alloc_/.test(session.sampleType)
+    ? 'allocation'
+    : /^inuse_/.test(session.sampleType)
+      ? 'memory'
+      : /delay|contentions|mutex|block/i.test(session.sampleType) ? 'blocking' : 'cpu';
   panel.webview.html = `<!doctype html>
 <html>
 <head>
@@ -178,11 +194,12 @@ export function showProfilePanel(session: ProfileSession, onOpenSource: (file: s
     .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:0 0 18px}.card{background:var(--vscode-editor-inactiveSelectionBackground);padding:10px 12px;border-radius:4px}.card strong{display:block;font-size:18px}.card span{color:var(--vscode-descriptionForeground);font-size:12px}
     .notice{border-left:3px solid var(--vscode-charts-blue);background:var(--vscode-textBlockQuote-background);padding:10px 12px;color:var(--vscode-descriptionForeground)}
     .meaning{border-left:3px solid var(--vscode-charts-blue);background:var(--vscode-textBlockQuote-background);padding:10px 12px;margin-bottom:10px}
+    .next-step{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 12px;margin-bottom:12px;border:1px solid var(--vscode-panel-border);border-radius:4px}.next-step strong{margin-right:4px}.next-step button{padding:6px 10px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:0}.next-step button.secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}
     .insights{display:grid;gap:8px;margin-bottom:16px}.insight{padding:10px 12px;border:1px solid var(--vscode-panel-border);border-radius:4px}.insight[data-file]:not([data-file=""]){cursor:pointer}.insight:hover{background:var(--vscode-list-hoverBackground)}.insight strong{display:block;margin-bottom:4px}.insight span{color:var(--vscode-descriptionForeground)}
     .tabs{display:flex;gap:8px;margin-bottom:12px}.tabs button{color:inherit;background:var(--vscode-button-secondaryBackground);border:0;padding:6px 12px}
     .tabs button.active{background:var(--vscode-button-background);color:var(--vscode-button-foreground)}
     section{display:none}section.active{display:block}table{border-collapse:collapse;width:100%}th,td{padding:6px 8px;border-bottom:1px solid var(--vscode-panel-border);text-align:left}
-    .source-row[data-file]:not([data-file=""]){cursor:pointer}.source-row:hover{background:var(--vscode-list-hoverBackground)}
+    .source-row[data-file]:not([data-file=""]){cursor:pointer}.source-row:hover{background:var(--vscode-list-hoverBackground)}.source-row.focused{outline:1px solid var(--vscode-focusBorder);background:var(--vscode-list-activeSelectionBackground)}
     .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:8px}.toolbar input{width:min(420px,70vw);padding:6px 8px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border)}
     .toolbar button{padding:6px 10px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:0}.hint{color:var(--vscode-descriptionForeground);font-size:12px}
     .flame-root{display:flex;align-items:flex-end;min-height:300px}.flame{box-sizing:border-box;display:flex;flex-direction:column-reverse;min-height:25px;border:1px solid var(--vscode-editor-background);background:var(--vscode-charts-orange);overflow:hidden;cursor:pointer}
@@ -201,6 +218,15 @@ export function showProfilePanel(session: ProfileSession, onOpenSource: (file: s
     <div class="card"><strong>${escapeHtml(hottest ? displayShortName(hottest.name) : '—')}</strong><span>Hottest function</span></div>
   </div>
   <div class="meaning"><b>这个 Profile 表示：</b>${escapeHtml(profileMeaning(session.sampleType))}</div>
+  <div class="next-step">
+    <strong>下一步：</strong>
+    ${kind === 'allocation' ? '<button data-action="escape">分析热点为什么逃逸</button>' : ''}
+    ${kind === 'memory' ? '<button data-action="recapture">检查三轮内存增长</button>' : ''}
+    ${kind === 'cpu' || kind === 'blocking' ? '<button data-tab-target="calls">查看调用路径</button>' : ''}
+    ${kind !== 'allocation' && baselineState === 'none' ? '<button class="secondary" data-action="baseline">设为修改前基线</button>' : ''}
+    ${kind !== 'allocation' && baselineState === 'available' ? '<button data-action="compare">与基线比较</button>' : ''}
+    ${kind !== 'memory' ? '<button class="secondary" data-action="recapture">修改后重新采集</button>' : ''}
+  </div>
   <div class="insights">
     ${insights.map((insight) => `<div class="insight" data-file="${escapeHtml(insight.location?.file ?? '')}" data-line="${insight.location?.line ?? 0}">
       <strong>${insight.kind === 'warning' ? '⚠ ' : ''}${escapeHtml(insight.title)}</strong>
@@ -211,16 +237,16 @@ export function showProfilePanel(session: ProfileSession, onOpenSource: (file: s
   <section id="top" class="active"><div class="toolbar"><input id="top-filter" placeholder="Filter functions or source paths"><label class="hint"><input id="hide-runtime" type="checkbox" checked> Hide Go runtime</label></div><table><thead><tr><th>Function</th><th>Flat</th><th>Cumulative</th><th>Source</th></tr></thead><tbody>
     ${session.hotspots.length === 0
       ? `<tr><td colspan="4"><div class="notice">No ${escapeHtml(session.sampleType)} samples were recorded. For CPU profiles, generate workload while the capture is running.</div></td></tr>`
-      : session.hotspots.slice(0, 100).map((hotspot) => `<tr class="source-row top-row" data-runtime="${isRuntimeHotspot(hotspot)}" data-filter="${escapeHtml(`${hotspot.name} ${hotspot.location?.file ?? ''}`.toLowerCase())}" data-file="${escapeHtml(hotspot.location?.file ?? '')}" data-line="${hotspot.location?.line ?? 0}">
+      : session.hotspots.slice(0, 100).map((hotspot) => `<tr class="source-row top-row${focusedHotspot?.id === hotspot.id ? ' focused' : ''}" data-runtime="${isRuntimeHotspot(hotspot)}" data-filter="${escapeHtml(`${hotspot.name} ${hotspot.location?.file ?? ''}`.toLowerCase())}" data-file="${escapeHtml(hotspot.location?.file ?? '')}" data-line="${hotspot.location?.line ?? 0}">
       <td>${escapeHtml(hotspot.name)}</td><td>${formatValue(hotspot.flat, session.sampleUnit)}</td><td>${formatValue(hotspot.cumulative, session.sampleUnit)}</td>
       <td>${escapeHtml(hotspot.location ? `${hotspot.location.file}:${hotspot.location.line}` : '')}</td></tr>`).join('')}
   </tbody></table></section>
   <section id="flame"><div class="toolbar"><button id="flame-reset" disabled>Reset zoom</button><span class="hint">Click to open source · Shift+click to zoom</span></div><div class="flame-root">${flameNodes(session.callTree, session.total)}</div></section>
   <section id="calls"><table><thead><tr><th>Call path</th><th>Value</th><th>Total</th><th>Source</th></tr></thead><tbody>${callRows(session.callTree, session)}</tbody></table></section>
-  <section id="source"><table><thead><tr><th>Source line</th><th>Function</th><th>Value</th><th>Total</th></tr></thead><tbody>
+  <section id="source"><table><thead><tr><th>Source line</th><th>Function</th><th>Self</th><th>With callees</th><th>Total</th></tr></thead><tbody>
     ${[...session.lineMetrics].sort((left, right) => right.value - left.value).slice(0, 200).map((metric) => {
       const percent = session.total === 0 ? 0 : metric.value / session.total * 100;
-      return `<tr class="source-row source-metric" data-runtime="${isRuntimeLine(metric)}" data-file="${escapeHtml(metric.file)}" data-line="${metric.line}"><td>${escapeHtml(`${metric.file}:${metric.line}`)}</td><td>${escapeHtml(metric.functionName)}</td><td>${formatValue(metric.value, session.sampleUnit)}</td><td>${percent.toFixed(1)}%</td></tr>`;
+      return `<tr class="source-row source-metric" data-runtime="${isRuntimeLine(metric)}" data-file="${escapeHtml(metric.file)}" data-line="${metric.line}"><td>${escapeHtml(`${metric.file}:${metric.line}`)}</td><td>${escapeHtml(metric.functionName)}</td><td>${metric.flat === undefined ? '—' : formatValue(metric.flat, session.sampleUnit)}</td><td>${formatValue(metric.value, session.sampleUnit)}</td><td>${percent.toFixed(1)}%</td></tr>`;
     }).join('')}
   </tbody></table></section>
   <script nonce="${nonce}">
@@ -229,8 +255,19 @@ export function showProfilePanel(session: ProfileSession, onOpenSource: (file: s
       document.querySelectorAll('.tabs button,section').forEach(element => element.classList.remove('active'));
       button.classList.add('active'); document.getElementById(button.dataset.tab).classList.add('active');
     }));
+    document.querySelectorAll('[data-tab-target]').forEach(button => button.addEventListener('click', () => {
+      document.querySelector('[data-tab="' + button.dataset.tabTarget + '"]')?.click();
+    }));
+    document.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => {
+      vscode.postMessage({command:'action',action:button.dataset.action});
+    }));
     const topFilter = document.getElementById('top-filter');
     const hideRuntime = document.getElementById('hide-runtime');
+    const focusedFunction = ${JSON.stringify(focusedHotspot?.name ?? '').replaceAll('<', '\\u003c')};
+    if (focusedFunction) {
+      topFilter.value = focusedFunction;
+      hideRuntime.checked = false;
+    }
     const updateVisibility = () => {
       const query = topFilter.value.trim().toLowerCase();
       document.querySelectorAll('.top-row').forEach(row => {
@@ -243,6 +280,7 @@ export function showProfilePanel(session: ProfileSession, onOpenSource: (file: s
     topFilter.addEventListener('input', updateVisibility);
     hideRuntime.addEventListener('change', updateVisibility);
     updateVisibility();
+    document.querySelector('.top-row.focused')?.scrollIntoView({block:'center'});
     const flameRoot = document.querySelector('.flame-root');
     const originalFlame = flameRoot.innerHTML;
     const reset = document.getElementById('flame-reset');
@@ -264,6 +302,11 @@ export function showProfilePanel(session: ProfileSession, onOpenSource: (file: s
   panel.webview.onDidReceiveMessage((message) => {
     if (message?.command === 'source' && typeof message.file === 'string' && typeof message.line === 'number') {
       onOpenSource(message.file, message.line);
+    } else if (
+      message?.command === 'action'
+      && (message.action === 'escape' || message.action === 'baseline' || message.action === 'compare' || message.action === 'recapture')
+    ) {
+      onAction?.(message.action, actionHotspot);
     }
   });
 }
@@ -389,11 +432,13 @@ export function showComparisonPanel(
     tr[data-file]:not([data-file=""]){cursor:pointer}tbody tr:hover{background:var(--vscode-list-hoverBackground)}
     .number{text-align:right;font-variant-numeric:tabular-nums}
     .verdict{border-left:3px solid ${comparison.totalDelta > 0 ? 'var(--vscode-testing-iconFailed)' : 'var(--vscode-testing-iconPassed)'};background:var(--vscode-textBlockQuote-background);padding:10px 12px;margin-bottom:14px}.verdict[data-file]:not([data-file=""]){cursor:pointer}
+    .warning{border-left:3px solid var(--vscode-editorWarning-foreground);background:var(--vscode-textBlockQuote-background);padding:8px 11px;margin-bottom:8px;color:var(--vscode-descriptionForeground)}
   </style>
 </head>
 <body>
   <h1>Profile comparison</h1>
   <div class="summary">${escapeHtml(baseline.name)} → ${escapeHtml(current.name)} · ${escapeHtml(current.sampleType)} (${escapeHtml(current.sampleUnit)})</div>
+  ${comparison.warnings.map((warning) => `<div class="warning">⚠ ${escapeHtml(warning)}</div>`).join('')}
   <div class="verdict" data-file="${escapeHtml(topRegression?.location?.file ?? '')}" data-line="${topRegression?.location?.line ?? 0}"><b>结论：</b>${escapeHtml(comparisonVerdict)}${topRegression ? ' 点击打开源码。' : ''}</div>
   <div class="cards">
     <div class="card"><strong>${formatValue(baseline.total, baseline.sampleUnit)}</strong><span>Baseline total</span></div>

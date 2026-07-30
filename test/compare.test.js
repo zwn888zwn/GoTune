@@ -33,6 +33,7 @@ test('compares matching, new, and removed hotspots', () => {
 
   assert.equal(result.totalDelta, -20);
   assert.equal(result.totalDeltaPercent, -20);
+  assert.equal(result.warnings.length, 2);
   assert.deepEqual(
     result.entries.map((entry) => [entry.name, entry.before, entry.after, entry.delta]),
     [
@@ -47,4 +48,16 @@ test('rejects profiles with different sample semantics', () => {
   const before = session('before', 100, []);
   const after = { ...session('after', 100, []), sampleType: 'alloc_space', sampleUnit: 'bytes' };
   assert.throws(() => compareProfiles(before, after), /Cannot compare/);
+});
+
+test('rejects CPU profiles captured for different durations', () => {
+  const before = { ...session('before', 100, []), target: 'example/app', captureDurationMs: 10_000 };
+  const after = { ...session('after', 100, []), target: 'example/app', captureDurationMs: 30_000 };
+  assert.throws(() => compareProfiles(before, after), /capture durations/);
+});
+
+test('rejects raw cumulative allocation comparisons', () => {
+  const before = { ...session('before', 100, []), sampleType: 'alloc_space', sampleUnit: 'bytes' };
+  const after = { ...session('after', 100, []), sampleType: 'alloc_space', sampleUnit: 'bytes' };
+  assert.throws(() => compareProfiles(before, after), /not a reliable before\/after benchmark/);
 });

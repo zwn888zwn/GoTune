@@ -10,7 +10,10 @@ const compilerLine = /^(.*?\.go):(\d+):(\d+):\s+(.*)$/;
 export async function analyzeEscapes(
   hotspot: Hotspot | undefined,
   session: ProfileSession | undefined,
-  diagnostics: vscode.DiagnosticCollection
+  diagnostics: vscode.DiagnosticCollection,
+  goExecutable: string,
+  environment: Record<string, string>,
+  buildFlags: string[] = []
 ): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   const file = hotspot?.location?.file ?? editor?.document.uri.fsPath;
@@ -25,16 +28,15 @@ export async function analyzeEscapes(
   }
   const functionRange = hotspot ? await findFunctionRange(resolvedFile, hotspot) : undefined;
 
-  const goExecutable = vscode.workspace.getConfiguration('gotune').get<string>('goExecutable', 'go');
   const cwd = path.dirname(resolvedFile.fsPath);
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'GoTune: analyzing escapes', cancellable: false },
     async () => {
       try {
-        const result = await execFileAsync(goExecutable, ['build', '-gcflags=-m=2', '.'], {
+        const result = await execFileAsync(goExecutable, ['build', ...buildFlags, '-gcflags=-m=2', '.'], {
           cwd,
           maxBuffer: 16 * 1024 * 1024,
-          env: process.env
+          env: { ...process.env, ...environment }
         });
         publishDiagnostics(`${result.stdout}\n${result.stderr}`, cwd, hotspot, session, functionRange, diagnostics);
       } catch (error) {
@@ -43,7 +45,7 @@ export async function analyzeEscapes(
         const count = publishDiagnostics(output, cwd, hotspot, session, functionRange, diagnostics);
         if (count === 0) {
           const hint = failure.code === 'ENOENT'
-            ? `Go executable "${goExecutable}" was not found. Set gotune.goExecutable in Settings.`
+            ? `Go executable "${goExecutable}" was not found. Check the VS Code Go extension settings.`
             : failure.message ?? 'Escape analysis failed';
           void vscode.window.showErrorMessage(`GoTune: ${hint}`);
         }

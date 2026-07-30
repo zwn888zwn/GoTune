@@ -24,6 +24,7 @@ export interface RunnerSnapshot {
   target?: MainPackage;
   pid?: number;
   pprofUrl?: string;
+  startedAt?: number;
   contentionProfilesEnabled?: boolean;
 }
 
@@ -56,9 +57,11 @@ export class ProfilerRunner implements vscode.Disposable {
       throw new Error('A GoTune target is already running');
     }
     this.stopRequested = false;
+    const startedAt = Date.now();
     this.setSnapshot({
       status: 'starting',
       target: options.target,
+      startedAt,
       contentionProfilesEnabled: options.enableContentionProfiles
     });
     this.output.show(true);
@@ -111,6 +114,7 @@ export class ProfilerRunner implements vscode.Disposable {
       status: 'starting',
       target: options.target,
       pid: child.pid,
+      startedAt,
       contentionProfilesEnabled: options.enableContentionProfiles
     });
 
@@ -129,6 +133,7 @@ export class ProfilerRunner implements vscode.Disposable {
             target: options.target,
             pid: child.pid,
             pprofUrl: line.slice(markerPrefix.length).trim(),
+            startedAt,
             contentionProfilesEnabled: options.enableContentionProfiles
           });
         } else if (line.startsWith(errorMarkerPrefix)) {

@@ -51,7 +51,7 @@
         },
         {
           "id": "gotune.findings",
-          "name": "Findings"
+          "name": "Code Hotspots"
         }
       ]
     },
@@ -122,6 +122,10 @@
         "title": "GoTune: Toggle Contention Profiling"
       },
       {
+        "command": "gotune.toggleAdvancedTools",
+        "title": "GoTune: Toggle Advanced Diagnostics"
+      },
+      {
         "command": "gotune.fetchProfile",
         "title": "GoTune: Fetch Profile from URL",
         "icon": "$(cloud-download)"
@@ -129,6 +133,10 @@
       {
         "command": "gotune.showProfile",
         "title": "GoTune: Show Active Profile"
+      },
+      {
+        "command": "gotune.showCurrentFunctionInProfile",
+        "title": "GoTune: Show Current Function in Profile"
       },
       {
         "command": "gotune.showSource",
@@ -142,11 +150,6 @@
         "command": "gotune.compareWithBaseline",
         "title": "GoTune: Compare with Baseline",
         "icon": "$(git-compare)"
-      },
-      {
-        "command": "gotune.toggleRuntimeFindings",
-        "title": "GoTune: Toggle Runtime Findings",
-        "icon": "$(filter)"
       },
       {
         "command": "gotune.analyzeEscape",
@@ -194,11 +197,6 @@
           "command": "gotune.compareWithBaseline",
           "when": "view == gotune.sessions && gotune.hasBaseline && gotune.hasActiveProfile",
           "group": "navigation@4"
-        },
-        {
-          "command": "gotune.toggleRuntimeFindings",
-          "when": "view == gotune.findings",
-          "group": "navigation@1"
         }
       ],
       "view/item/context": [
@@ -224,7 +222,7 @@
         },
         {
           "command": "gotune.analyzeEscape",
-          "when": "view == gotune.findings && viewItem == gotuneHotspot",
+          "when": "view == gotune.findings && viewItem == gotuneHotspot && gotune.activeProfileKind == allocation",
           "group": "inline@2"
         }
       ],
@@ -235,13 +233,13 @@
           "group": "run@1"
         },
         {
-          "command": "gotune.showProfile",
+          "command": "gotune.showCurrentFunctionInProfile",
           "when": "editorLangId == go && gotune.hasActiveProfile",
           "group": "navigation@100"
         },
         {
           "command": "gotune.analyzeEscape",
-          "when": "editorLangId == go && gotune.hasActiveProfile",
+          "when": "editorLangId == go && gotune.activeProfileKind == allocation",
           "group": "navigation@101"
         }
       ],
@@ -264,7 +262,7 @@
         "gotune.goExecutable": {
           "type": "string",
           "default": "go",
-          "description": "Go executable used for escape analysis."
+          "description": "Optional Go executable override used by GoTune. When left as go, VS Code Go settings are used."
         },
         "gotune.fetchTimeoutSeconds": {
           "type": "number",
