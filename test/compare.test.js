@@ -61,3 +61,18 @@ test('rejects raw cumulative allocation comparisons', () => {
   const after = { ...session('after', 100, []), sampleType: 'alloc_space', sampleUnit: 'bytes' };
   assert.throws(() => compareProfiles(before, after), /not a reliable before\/after benchmark/);
 });
+
+test('allows equal-duration allocation delta profiles from the same scenario', () => {
+  const metadata = {
+    sampleType: 'alloc_space',
+    sampleUnit: 'bytes',
+    captureMode: 'delta',
+    captureDurationMs: 10_000,
+    target: 'example/app',
+    scenarioId: 'load-test'
+  };
+  const before = { ...session('before', 100, [['main.hot', 80]]), ...metadata };
+  const after = { ...session('after', 70, [['main.hot', 50]]), ...metadata };
+
+  assert.equal(compareProfiles(before, after).entries[0].delta, -30);
+});

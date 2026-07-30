@@ -13,10 +13,16 @@ export function compareProfiles(baseline: ProfileSession, current: ProfileSessio
   if (baseline.target && current.target && baseline.target !== current.target) {
     throw new Error(`Cannot compare different targets: ${baseline.target} and ${current.target}`);
   }
-  if (/^alloc_/.test(current.sampleType)) {
+  if (
+    /^alloc_/.test(current.sampleType)
+    && (baseline.captureMode !== 'delta' || current.captureMode !== 'delta')
+  ) {
     throw new Error(
       'Cumulative allocation profiles are not a reliable before/after benchmark. Use allocs/op and B/op benchmark results.'
     );
+  }
+  if (baseline.scenarioId && current.scenarioId && baseline.scenarioId !== current.scenarioId) {
+    throw new Error('Cannot compare captures from different performance scenarios');
   }
   if (
     baseline.captureDurationMs

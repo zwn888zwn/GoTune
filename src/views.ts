@@ -1,6 +1,11 @@
 import * as vscode from 'vscode';
-import { ProfileInsight } from './insights';
-import { Hotspot, ProfileSession } from './model';
+import {
+  Hotspot,
+  Investigation,
+  PerformanceFinding,
+  PerformanceScenario,
+  ProfileSession
+} from './model';
 import { RunnerSnapshot } from './runner';
 import { formatValue } from './webview';
 
@@ -124,25 +129,94 @@ export class HotspotItem extends vscode.TreeItem {
   }
 }
 
-export class FindingItem extends vscode.TreeItem {
+export class InvestigationFindingItem extends vscode.TreeItem {
   readonly hotspot: Hotspot | undefined;
 
-  constructor(insight: ProfileInsight, session: ProfileSession) {
-    super(insight.title, vscode.TreeItemCollapsibleState.None);
-    const location = insight.location;
-    this.hotspot = location
-      ? session.hotspots.find((hotspot) =>
-        hotspot.location?.file === location.file
-        && hotspot.location?.line === location.line
+  constructor(finding: PerformanceFinding, session?: ProfileSession) {
+    super(finding.title, vscode.TreeItemCollapsibleState.None);
+    this.hotspot = finding.location
+      ? session?.hotspots.find((hotspot) =>
+        hotspot.location?.file === finding.location?.file
+        && hotspot.location?.line === finding.location?.line
       )
       : undefined;
-    this.description = insight.detail;
-    this.tooltip = `${insight.title}\n\n${insight.detail}`;
-    this.iconPath = new vscode.ThemeIcon(insight.kind === 'warning' ? 'warning' : 'lightbulb');
+    this.description = finding.detail;
+    this.tooltip = `${finding.title}\n\n${finding.detail}`;
+    this.iconPath = new vscode.ThemeIcon(
+      finding.severity === 'suspicious' ? 'warning'
+        : finding.severity === 'verified' ? 'verified'
+          : finding.severity === 'watch' ? 'eye' : 'lightbulb'
+    );
     this.contextValue = this.hotspot ? 'gotuneHotspot' : 'gotuneFinding';
-    if (this.hotspot) {
-      this.command = { command: 'gotune.showSource', title: 'Open Source', arguments: [this] };
+    if (finding.location) {
+      this.command = {
+        command: 'gotune.showFindingSource',
+        title: 'Open Finding Source',
+        arguments: [finding]
+      };
     }
+  }
+}
+
+export class InvestigationSummaryItem extends vscode.TreeItem {
+  constructor(investigation: Investigation, label: string, description?: string, icon = 'info') {
+    super(label, vscode.TreeItemCollapsibleState.None);
+    this.description = description;
+    this.tooltip = `${investigation.name}\n${investigation.target ?? 'No target'}\nUpdated ${new Date(investigation.updatedAt).toLocaleString()}`;
+    this.iconPath = new vscode.ThemeIcon(icon);
+    this.contextValue = 'gotuneInvestigationSummary';
+  }
+}
+
+export function investigationItems(investigation: Investigation | undefined): InvestigationSummaryItem[] {
+  if (!investigation) {
+    return [new InvestigationSummaryItem(
+      {
+        id: '',
+        name: 'No active investigation',
+        problem: 'code',
+        captureIds: [],
+        findings: [],
+        baselineByMetric: {},
+        createdAt: 0,
+        updatedAt: 0
+      },
+      'No active investigation',
+      'Inspect a function or choose a problem to begin',
+      'search'
+    )];
+  }
+  return [
+    new InvestigationSummaryItem(investigation, investigation.name, investigation.target, 'search'),
+    new InvestigationSummaryItem(
+      investigation,
+      `${investigation.captureIds.length} evidence capture${investigation.captureIds.length === 1 ? '' : 's'}`,
+      `${investigation.findings.length} finding${investigation.findings.length === 1 ? '' : 's'}`,
+      'pulse'
+    ),
+    new InvestigationSummaryItem(
+      investigation,
+      Object.keys(investigation.baselineByMetric).length > 0 ? 'Baseline ready' : 'No verification baseline yet',
+      Object.keys(investigation.baselineByMetric).join(', ') || 'Set a baseline from evidence',
+      Object.keys(investigation.baselineByMetric).length > 0 ? 'target' : 'circle-large-outline'
+    )
+  ];
+}
+
+export class ScenarioItem extends vscode.TreeItem {
+  constructor(public readonly scenario: PerformanceScenario) {
+    super(scenario.name, vscode.TreeItemCollapsibleState.None);
+    this.description = `${scenario.problem} · ${scenario.captureSeconds}s`;
+    this.tooltip = [
+      `Problem: ${scenario.problem}`,
+      `Target: ${scenario.target ?? 'current target'}`,
+      `Workload: ${scenario.workloadKind}${scenario.workload ? ` · ${scenario.workload}` : ''}`,
+      `Warmup: ${scenario.warmupSeconds}s`,
+      `Capture: ${scenario.captureKinds.join(', ')} for ${scenario.captureSeconds}s`
+    ].join('\n');
+    this.iconPath = new vscode.ThemeIcon('run-all');
+    this.contextValue = 'gotuneScenario';
+    this.command = { command: 'gotune.runScenario', title: 'Run Scenario', arguments: [this] };
   }
 }
 

@@ -40,9 +40,65 @@ export interface ProfileSession {
   target?: string;
   captureDurationMs?: number;
   processStartedAt?: number;
+  captureMode?: 'snapshot' | 'delta';
+  scenarioId?: string;
   hotspots: Hotspot[];
   callTree: CallNode[];
   lineMetrics: LineMetric[];
+}
+
+export type ProblemKind = 'code' | 'cpu' | 'memory-growth' | 'allocations' | 'blocking' | 'latency';
+export type EvidenceKind = 'cpu' | 'allocation' | 'live-memory' | 'blocking' | 'goroutine' | 'trace';
+export type FindingSeverity = 'info' | 'watch' | 'suspicious' | 'verified';
+
+export interface PerformanceFinding {
+  id: string;
+  investigationId: string;
+  captureId?: string;
+  kind: EvidenceKind;
+  severity: FindingSeverity;
+  title: string;
+  detail: string;
+  functionName?: string;
+  location?: SourceLocation;
+  createdAt: number;
+}
+
+export interface Investigation {
+  id: string;
+  name: string;
+  problem: ProblemKind;
+  target?: string;
+  scenarioId?: string;
+  captureIds: string[];
+  findings: PerformanceFinding[];
+  baselineByMetric: Record<string, string>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type WorkloadKind = 'manual' | 'vscode-task' | 'command' | 'benchmark';
+
+export interface PerformanceScenario {
+  id: string;
+  name: string;
+  target?: string;
+  problem: ProblemKind;
+  workloadKind: WorkloadKind;
+  workload?: string;
+  warmupSeconds: number;
+  captureSeconds: number;
+  captureKinds: EvidenceKind[];
+  successMetrics: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface GoFunctionReference {
+  name: string;
+  file: string;
+  startLine: number;
+  endLine: number;
 }
 
 export interface ComparisonEntry {
