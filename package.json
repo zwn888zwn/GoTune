@@ -1,0 +1,321 @@
+{
+  "name": "gotune",
+  "displayName": "GoTune",
+  "description": "Source-centered Go performance analysis for VS Code.",
+  "version": "0.6.0",
+  "publisher": "gotune",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Visualization"
+  ],
+  "activationEvents": [
+    "onLanguage:go",
+    "onView:gotune.sessions",
+    "onView:gotune.findings"
+  ],
+  "main": "./out/extension.js",
+  "scripts": {
+    "compile": "tsc -p ./",
+    "test": "npm run compile && node --test test/*.test.js",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/vscode": "^1.100.0",
+    "typescript": "^7.0.2"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "gotune",
+          "title": "Go Performance",
+          "icon": "resources/performance.svg"
+        }
+      ]
+    },
+    "views": {
+      "gotune": [
+        {
+          "id": "gotune.running",
+          "name": "Running"
+        },
+        {
+          "id": "gotune.sessions",
+          "name": "Sessions"
+        },
+        {
+          "id": "gotune.findings",
+          "name": "Findings"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "gotune.importProfile",
+        "title": "GoTune: Import pprof Profile",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "gotune.runWithProfiler",
+        "title": "GoTune: Run with Profiler",
+        "icon": "$(run)"
+      },
+      {
+        "command": "gotune.stopProfilerTarget",
+        "title": "GoTune: Stop Profiler Target",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "gotune.captureCpu",
+        "title": "GoTune: Capture CPU Profile",
+        "icon": "$(record)"
+      },
+      {
+        "command": "gotune.showRuntimeOverview",
+        "title": "GoTune: Show Live Performance Overview"
+      },
+      {
+        "command": "gotune.captureHeap",
+        "title": "GoTune: Capture Heap Profile"
+      },
+      {
+        "command": "gotune.captureAllocations",
+        "title": "GoTune: Capture Allocation Profile"
+      },
+      {
+        "command": "gotune.captureGoroutines",
+        "title": "GoTune: Capture Goroutine Profile"
+      },
+      {
+        "command": "gotune.monitorGoroutines",
+        "title": "GoTune: Check Goroutine Leaks"
+      },
+      {
+        "command": "gotune.captureMutex",
+        "title": "GoTune: Capture Mutex Profile"
+      },
+      {
+        "command": "gotune.captureBlock",
+        "title": "GoTune: Capture Block Profile"
+      },
+      {
+        "command": "gotune.checkMemoryGrowth",
+        "title": "GoTune: Check Memory Growth"
+      },
+      {
+        "command": "gotune.captureTrace",
+        "title": "GoTune: Trace Execution Time"
+      },
+      {
+        "command": "gotune.showTargetOutput",
+        "title": "GoTune: Show Profiler Target Output",
+        "icon": "$(output)"
+      },
+      {
+        "command": "gotune.toggleContentionProfiles",
+        "title": "GoTune: Toggle Contention Profiling"
+      },
+      {
+        "command": "gotune.fetchProfile",
+        "title": "GoTune: Fetch Profile from URL",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "gotune.showProfile",
+        "title": "GoTune: Show Active Profile"
+      },
+      {
+        "command": "gotune.showSource",
+        "title": "GoTune: Open Hotspot Source"
+      },
+      {
+        "command": "gotune.setBaseline",
+        "title": "GoTune: Set as Baseline"
+      },
+      {
+        "command": "gotune.compareWithBaseline",
+        "title": "GoTune: Compare with Baseline",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "gotune.toggleRuntimeFindings",
+        "title": "GoTune: Toggle Runtime Findings",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "gotune.analyzeEscape",
+        "title": "GoTune: Analyze Escapes for Hotspot"
+      },
+      {
+        "command": "gotune.clearSessions",
+        "title": "GoTune: Clear Sessions",
+        "icon": "$(clear-all)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "gotune.runWithProfiler",
+          "when": "view == gotune.running && !gotune.targetActive",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gotune.stopProfilerTarget",
+          "when": "view == gotune.running && gotune.targetActive",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gotune.showTargetOutput",
+          "when": "view == gotune.running && gotune.targetActive",
+          "group": "navigation@2"
+        },
+        {
+          "command": "gotune.importProfile",
+          "when": "view == gotune.sessions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gotune.fetchProfile",
+          "when": "view == gotune.sessions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "gotune.clearSessions",
+          "when": "view == gotune.sessions",
+          "group": "navigation@3"
+        },
+        {
+          "command": "gotune.compareWithBaseline",
+          "when": "view == gotune.sessions && gotune.hasBaseline && gotune.hasActiveProfile",
+          "group": "navigation@4"
+        },
+        {
+          "command": "gotune.toggleRuntimeFindings",
+          "when": "view == gotune.findings",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "gotune.showProfile",
+          "when": "view == gotune.sessions && viewItem == gotuneSession",
+          "group": "inline"
+        },
+        {
+          "command": "gotune.setBaseline",
+          "when": "view == gotune.sessions && viewItem == gotuneSession",
+          "group": "gotune@1"
+        },
+        {
+          "command": "gotune.compareWithBaseline",
+          "when": "view == gotune.sessions && viewItem == gotuneSession && gotune.hasBaseline",
+          "group": "gotune@2"
+        },
+        {
+          "command": "gotune.showSource",
+          "when": "view == gotune.findings && viewItem == gotuneHotspot",
+          "group": "inline@1"
+        },
+        {
+          "command": "gotune.analyzeEscape",
+          "when": "view == gotune.findings && viewItem == gotuneHotspot",
+          "group": "inline@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "gotune.runWithProfiler",
+          "when": "editorLangId == go && !gotune.targetActive",
+          "group": "run@1"
+        },
+        {
+          "command": "gotune.showProfile",
+          "when": "editorLangId == go && gotune.hasActiveProfile",
+          "group": "navigation@100"
+        },
+        {
+          "command": "gotune.analyzeEscape",
+          "when": "editorLangId == go && gotune.hasActiveProfile",
+          "group": "navigation@101"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "gotune.runWithProfiler",
+          "when": "editorLangId == go && !gotune.targetActive",
+          "group": "navigation@20"
+        },
+        {
+          "command": "gotune.stopProfilerTarget",
+          "when": "editorLangId == go && gotune.targetActive",
+          "group": "navigation@20"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "GoTune",
+      "properties": {
+        "gotune.goExecutable": {
+          "type": "string",
+          "default": "go",
+          "description": "Go executable used for escape analysis."
+        },
+        "gotune.fetchTimeoutSeconds": {
+          "type": "number",
+          "default": 45,
+          "minimum": 1,
+          "description": "Timeout for downloading a pprof profile."
+        },
+        "gotune.captureCpuSeconds": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 300,
+          "description": "CPU capture duration for a GoTune-managed target."
+        },
+        "gotune.captureTraceSeconds": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 60,
+          "description": "Execution trace duration for a GoTune-managed target."
+        },
+        "gotune.runBuildFlags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional go run build flags used by Run with Profiler."
+        },
+        "gotune.runArguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Program arguments passed to a GoTune-managed target."
+        },
+        "gotune.runEnvironment": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment variables added when running a GoTune-managed target."
+        },
+        "gotune.enableContentionProfiles": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Go block and mutex sampling in Run with Profiler. This adds runtime overhead."
+        }
+      }
+    }
+  }
+}

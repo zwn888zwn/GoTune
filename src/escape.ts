@@ -1,0 +1,177 @@
+import { execFile } from 'node:child_process';
+import * as path from 'node:path';
+import { promisify } from 'node:util';
+import * as vscode from 'vscode';
+import { Hotspot, ProfileSession } from './model';
+
+const execFileAsync = promisify(execFile);
+const compilerLine = /^(.*?\.go):(\d+):(\d+):\s+(.*)$/;
+
+export async function analyzeEscapes(
+  hotspot: Hotspot | undefined,
+  session: ProfileSession | undefined,
+  diagnostics: vscode.DiagnosticCollection
+): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  const file = hotspot?.location?.file ?? editor?.document.uri.fsPath;
+  if (!file) {
+    void vscode.window.showInformationMessage('GoTune: Select a hotspot with source information first.');
+    return;
+  }
+  const resolvedFile = await resolveSourceFile(file);
+  if (!resolvedFile) {
+    void vscode.window.showWarningMessage(`GoTune: Could not locate ${file} in this workspace.`);
+    return;
+  }
+  const functionRange = hotspot ? await findFunctionRange(resolvedFile, hotspot) : undefined;
+
+  const goExecutable = vscode.workspace.getConfiguration('gotune').get<string>('goExecutable', 'go');
+  const cwd = path.dirname(resolvedFile.fsPath);
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'GoTune: analyzing escapes', cancellable: false },
+    async () => {
+      try {
+        const result = await execFileAsync(goExecutable, ['build', '-gcflags=-m=2', '.'], {
+          cwd,
+          maxBuffer: 16 * 1024 * 1024,
+          env: process.env
+        });
+        publishDiagnostics(`${result.stdout}\n${result.stderr}`, cwd, hotspot, session, functionRange, diagnostics);
+      } catch (error) {
+        const failure = error as { stdout?: string; stderr?: string; message?: string; code?: string };
+        const output = `${failure.stdout ?? ''}\n${failure.stderr ?? ''}`;
+        const count = publishDiagnostics(output, cwd, hotspot, session, functionRange, diagnostics);
+        if (count === 0) {
+          const hint = failure.code === 'ENOENT'
+            ? `Go executable "${goExecutable}" was not found. Set gotune.goExecutable in Settings.`
+            : failure.message ?? 'Escape analysis failed';
+          void vscode.window.showErrorMessage(`GoTune: ${hint}`);
+        }
+      }
+    }
+  );
+}
+
+function publishDiagnostics(
+  output: string,
+  cwd: string,
+  hotspot: Hotspot | undefined,
+  session: ProfileSession | undefined,
+  functionRange: vscode.Range | undefined,
+  collection: vscode.DiagnosticCollection
+): number {
+  collection.clear();
+  const grouped = new Map<string, vscode.Diagnostic[]>();
+  for (const rawLine of output.split(/\r?\n/)) {
+    const match = compilerLine.exec(rawLine.trim());
+    if (!match) continue;
+    const message = match[4];
+    if (!/(escapes to heap|moved to heap|captur|leaking param|heap)/i.test(message)) continue;
+    const filename = path.resolve(cwd, match[1]);
+    if (hotspot?.location?.file && path.basename(filename) !== path.basename(hotspot.location.file)) continue;
+    const line = Math.max(0, Number(match[2]) - 1);
+    if (functionRange && (line < functionRange.start.line || line > functionRange.end.line)) continue;
+    const column = Math.max(0, Number(match[3]) - 1);
+    const evidence = hotspot && session
+      ? ` · Profile evidence: ${formatProfileValue(hotspot.cumulative, session.sampleUnit)} cumulative`
+      : '';
+    const diagnostic = new vscode.Diagnostic(
+      new vscode.Range(line, column, line, column + 1),
+      `${message}${evidence}`,
+      vscode.DiagnosticSeverity.Information
+    );
+    diagnostic.source = 'GoTune escape analysis';
+    grouped.set(filename, [...(grouped.get(filename) ?? []), diagnostic]);
+  }
+  for (const [filename, entries] of grouped) {
+    collection.set(vscode.Uri.file(filename), entries);
+  }
+  const count = [...grouped.values()].reduce((sum, entries) => sum + entries.length, 0);
+  const target = hotspot?.name ?? 'current package';
+  const summary = count === 0
+    ? `GoTune: ${target} has no compiler-reported escapes.`
+    : `GoTune: found ${count} escape result${count === 1 ? '' : 's'} in ${target}.`;
+  void vscode.window.showInformationMessage(summary);
+  return count;
+}
+
+async function findFunctionRange(uri: vscode.Uri, hotspot: Hotspot): Promise<vscode.Range | undefined> {
+  const document = await vscode.workspace.openTextDocument(uri);
+  const targetLine = Math.max(0, Math.min(document.lineCount - 1, (hotspot.location?.line ?? 1) - 1));
+  const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+    'vscode.executeDocumentSymbolProvider',
+    uri
+  );
+  const candidates: vscode.DocumentSymbol[] = [];
+  const visit = (items: vscode.DocumentSymbol[]): void => {
+    for (const item of items) {
+      if (item.kind === vscode.SymbolKind.Function || item.kind === vscode.SymbolKind.Method) {
+        candidates.push(item);
+      }
+      visit(item.children);
+    }
+  };
+  visit(symbols ?? []);
+  const position = new vscode.Position(targetLine, 0);
+  const symbol = candidates
+    .filter((candidate) => candidate.range.contains(position))
+    .sort((left, right) => rangeSize(left.range) - rangeSize(right.range))[0];
+  if (symbol) return symbol.range;
+
+  for (let start = targetLine; start >= 0; start--) {
+    if (!/^\s*func\b/.test(document.lineAt(start).text)) continue;
+    let depth = 0;
+    let opened = false;
+    for (let end = start; end < document.lineCount; end++) {
+      for (const character of document.lineAt(end).text) {
+        if (character === '{') {
+          depth++;
+          opened = true;
+        } else if (character === '}') {
+          depth--;
+        }
+      }
+      if (opened && depth <= 0) {
+        return new vscode.Range(start, 0, end, document.lineAt(end).text.length);
+      }
+    }
+  }
+  return undefined;
+}
+
+function rangeSize(range: vscode.Range): number {
+  return (range.end.line - range.start.line) * 100_000 + range.end.character - range.start.character;
+}
+
+function formatProfileValue(value: number, unit: string): string {
+  if (unit === 'nanoseconds') {
+    if (Math.abs(value) >= 1e9) return `${(value / 1e9).toFixed(2)} s`;
+    if (Math.abs(value) >= 1e6) return `${(value / 1e6).toFixed(2)} ms`;
+    if (Math.abs(value) >= 1e3) return `${(value / 1e3).toFixed(2)} µs`;
+    return `${value.toFixed(0)} ns`;
+  }
+  if (unit === 'bytes') {
+    if (Math.abs(value) >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GiB`;
+    if (Math.abs(value) >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(2)} MiB`;
+    if (Math.abs(value) >= 1024) return `${(value / 1024).toFixed(2)} KiB`;
+    return `${value.toFixed(0)} B`;
+  }
+  return new Intl.NumberFormat().format(value);
+}
+
+export async function resolveSourceFile(filename: string): Promise<vscode.Uri | undefined> {
+  const direct = vscode.Uri.file(filename);
+  try {
+    await vscode.workspace.fs.stat(direct);
+    return direct;
+  } catch {
+    const normalized = filename.replaceAll('\\', '/');
+    const parts = normalized.split('/');
+    for (let length = Math.min(5, parts.length); length >= 1; length--) {
+      const suffix = parts.slice(-length).join('/');
+      const matches = await vscode.workspace.findFiles(`**/${suffix}`, '**/{vendor,node_modules}/**', 2);
+      if (matches.length === 1) return matches[0];
+    }
+    return undefined;
+  }
+}
