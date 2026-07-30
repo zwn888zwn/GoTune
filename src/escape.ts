@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import { Hotspot, ProfileSession } from './model';
+import { applySourcePathMappings } from './sourcePath';
 
 const execFileAsync = promisify(execFile);
 const compilerLine = /^(.*?\.go):(\d+):(\d+):\s+(.*)$/;
@@ -162,12 +163,16 @@ function formatProfileValue(value: number, unit: string): string {
 }
 
 export async function resolveSourceFile(filename: string): Promise<vscode.Uri | undefined> {
-  const direct = vscode.Uri.file(filename);
+  const mappings = vscode.workspace
+    .getConfiguration('gotune')
+    .get<Record<string, string>>('sourcePathMappings', {});
+  const mappedFilename = applySourcePathMappings(filename, mappings);
+  const direct = vscode.Uri.file(mappedFilename);
   try {
     await vscode.workspace.fs.stat(direct);
     return direct;
   } catch {
-    const normalized = filename.replaceAll('\\', '/');
+    const normalized = mappedFilename.replaceAll('\\', '/');
     const parts = normalized.split('/');
     for (let length = Math.min(5, parts.length); length >= 1; length--) {
       const suffix = parts.slice(-length).join('/');

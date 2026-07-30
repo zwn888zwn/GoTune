@@ -1,7 +1,11 @@
 export const markerPrefix = 'GOTUNE_PPROF=';
 export const errorMarkerPrefix = 'GOTUNE_PPROF_ERROR=';
 
-export function createAgentSource(token: string, enableContentionProfiles = false): string {
+export function createAgentSource(
+  token: string,
+  enableContentionProfiles = false,
+  listenAddress = '127.0.0.1:0'
+): string {
   return `package main
 
 import (
@@ -17,7 +21,7 @@ import (
 
 func init() {
 	${enableContentionProfiles ? 'runtime.SetBlockProfileRate(1)\n\truntime.SetMutexProfileFraction(1)' : '_ = runtime.SetMutexProfileFraction'}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", ${JSON.stringify(listenAddress)})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "${errorMarkerPrefix}"+err.Error())
 		return

@@ -33,7 +33,9 @@ export function runningItems(
 ): RunningItem[] {
   if (snapshot.status === 'idle') {
     return [
+      new RunningItem('Investigate a performance problem', 'choose the symptom; GoTune selects evidence', 'search', 'gotune.startInvestigation'),
       new RunningItem('Run current Go main with profiler', 'use the active package main when possible', 'run', 'gotune.runWithProfiler'),
+      new RunningItem('Run launch.json with profiler', 'reuse project environment, arguments, and debug setup', 'debug-start', 'gotune.runLaunchWithProfiler'),
       new RunningItem('Connect to a pprof server', 'for an already running Go process', 'plug', 'gotune.fetchProfile'),
       new RunningItem('Import an existing profile', 'open a .pprof or protobuf file', 'folder-opened', 'gotune.importProfile')
     ];
@@ -132,7 +134,7 @@ export class HotspotItem extends vscode.TreeItem {
 export class InvestigationFindingItem extends vscode.TreeItem {
   readonly hotspot: Hotspot | undefined;
 
-  constructor(finding: PerformanceFinding, session?: ProfileSession) {
+  constructor(public readonly finding: PerformanceFinding, session?: ProfileSession) {
     super(finding.title, vscode.TreeItemCollapsibleState.None);
     this.hotspot = finding.location
       ? session?.hotspots.find((hotspot) =>
@@ -147,7 +149,7 @@ export class InvestigationFindingItem extends vscode.TreeItem {
         : finding.severity === 'verified' ? 'verified'
           : finding.severity === 'watch' ? 'eye' : 'lightbulb'
     );
-    this.contextValue = this.hotspot ? 'gotuneHotspot' : 'gotuneFinding';
+    this.contextValue = 'gotuneFinding';
     if (finding.location) {
       this.command = {
         command: 'gotune.showFindingSource',
@@ -186,6 +188,7 @@ export function investigationItems(investigation: Investigation | undefined): In
       'search'
     )];
   }
+  const target = investigation.findings.find((finding) => finding.id === investigation.targetFindingId);
   return [
     new InvestigationSummaryItem(investigation, investigation.name, investigation.target, 'search'),
     new InvestigationSummaryItem(
@@ -199,21 +202,34 @@ export function investigationItems(investigation: Investigation | undefined): In
       Object.keys(investigation.baselineByMetric).length > 0 ? 'Baseline ready' : 'No verification baseline yet',
       Object.keys(investigation.baselineByMetric).join(', ') || 'Set a baseline from evidence',
       Object.keys(investigation.baselineByMetric).length > 0 ? 'target' : 'circle-large-outline'
-    )
+    ),
+    ...(target ? [new InvestigationSummaryItem(
+      investigation,
+      `Optimization target: ${target.title}`,
+      target.location ? `${target.location.file}:${target.location.line}` : target.detail,
+      'pin'
+    )] : [])
   ];
 }
 
 export class ScenarioItem extends vscode.TreeItem {
   constructor(public readonly scenario: PerformanceScenario) {
     super(scenario.name, vscode.TreeItemCollapsibleState.None);
-    this.description = `${scenario.problem} · ${scenario.captureSeconds}s`;
+    const runs = scenario.runs?.length ?? 0;
+    this.description = scenario.workloadKind === 'benchmark'
+      ? `benchmark · ${runs} run${runs === 1 ? '' : 's'}`
+      : `${scenario.problem} · ${scenario.captureSeconds}s · ${runs} run${runs === 1 ? '' : 's'}`;
     this.tooltip = [
       `Problem: ${scenario.problem}`,
       `Target: ${scenario.target ?? 'current target'}`,
+      scenario.launchConfiguration ? `Launch: ${scenario.launchConfiguration}` : undefined,
       `Workload: ${scenario.workloadKind}${scenario.workload ? ` · ${scenario.workload}` : ''}`,
       `Warmup: ${scenario.warmupSeconds}s`,
-      `Capture: ${scenario.captureKinds.join(', ')} for ${scenario.captureSeconds}s`
-    ].join('\n');
+      scenario.workloadKind === 'benchmark'
+        ? `Benchmark: count=${scenario.benchmarkCount ?? 5} · benchtime=${scenario.benchmarkTime ?? '1s'}`
+        : `Capture: ${scenario.captureKinds.join(', ')} for ${scenario.captureSeconds}s`,
+      scenario.successMetrics.length > 0 ? `Metrics: ${scenario.successMetrics.join(', ')}` : undefined
+    ].filter(Boolean).join('\n');
     this.iconPath = new vscode.ThemeIcon('run-all');
     this.contextValue = 'gotuneScenario';
     this.command = { command: 'gotune.runScenario', title: 'Run Scenario', arguments: [this] };

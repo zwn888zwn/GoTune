@@ -7,6 +7,7 @@ export type FunctionEvidenceAction =
   | { command: 'open-profile'; sessionId: string }
   | { command: 'analyze-escape'; sessionId: string }
   | { command: 'capture'; kind: EvidenceKind }
+  | { command: 'open-related-source'; file: string; line: number }
   | { command: 'open-source' };
 
 export function showFunctionEvidencePanel(
@@ -65,7 +66,9 @@ export function showFunctionEvidencePanel(
       vscode.postMessage({
         command: button.dataset.command,
         sessionId: button.dataset.sessionId,
-        kind: button.dataset.kind
+        kind: button.dataset.kind,
+        file: button.dataset.file,
+        line: Number(button.dataset.line)
       });
     });
   </script>
@@ -83,6 +86,12 @@ export function showFunctionEvidencePanel(
       onAction({ command: 'capture', kind: message.kind });
     } else if (message?.command === 'open-source') {
       onAction({ command: 'open-source' });
+    } else if (
+      message?.command === 'open-related-source'
+      && typeof message.file === 'string'
+      && Number.isFinite(message.line)
+    ) {
+      onAction({ command: 'open-related-source', file: message.file, line: message.line });
     }
   });
 }
@@ -102,7 +111,16 @@ function evidenceHtml(item: FunctionEvidenceItem): string {
       <div class="metric"><strong>${formatValue(item.self, item.sampleUnit)}</strong><span>Self · ${item.selfPercent.toFixed(1)}%</span></div>
       <div class="metric"><strong>${formatValue(item.cumulative, item.sampleUnit)}</strong><span>With callees · ${item.cumulativePercent.toFixed(1)}%</span></div>
     </div>
-    ${item.primaryCaller ? `<div class="caller">Primary caller: <b>${escapeHtml(item.primaryCaller.name)}</b></div>` : ''}
+    ${item.primaryCaller ? `<div class="caller">Primary caller: <b>${escapeHtml(item.primaryCaller.name)}</b>
+      ${item.primaryCaller.location
+        ? relatedButton('查看调用方', item.primaryCaller.location.file, item.primaryCaller.location.line)
+        : ''}
+    </div>` : ''}
+    ${item.primaryCallees.length > 0 ? `<div class="caller">Top callees:
+      ${item.primaryCallees.map((callee) => callee.location
+        ? relatedButton(callee.name, callee.location.file, callee.location.line)
+        : `<span>${escapeHtml(callee.name)}</span>`).join(' ')}
+    </div>` : ''}
     ${deltaText ? `<div class="delta ${deltaClass}">Baseline delta: <b>${escapeHtml(deltaText)}</b></div>` : ''}
     <div class="actions">
       <button data-command="open-profile" data-session-id="${escapeHtml(item.sessionId)}">打开完整证据</button>
@@ -111,6 +129,10 @@ function evidenceHtml(item: FunctionEvidenceItem): string {
         : ''}
     </div>
   </div>`;
+}
+
+function relatedButton(label: string, file: string, line: number): string {
+  return `<button class="secondary" data-command="open-related-source" data-file="${escapeHtml(file)}" data-line="${line}">${escapeHtml(label)}</button>`;
 }
 
 function kindLabel(kind: EvidenceKind): string {

@@ -37,7 +37,13 @@ function session(id, sampleType, self, cumulative) {
         name: 'main.work',
         value: cumulative,
         location: { file: '/workspace/main.go', line: 10 },
-        children: []
+        children: [{
+          id: 'callee-id',
+          name: 'main.callee',
+          value: cumulative / 2,
+          location: { file: '/workspace/helper.go', line: 4 },
+          children: []
+        }]
       }]
     }],
     lineMetrics: []
@@ -53,6 +59,7 @@ test('combines CPU and allocation evidence for the current function', () => {
   assert.deepEqual(report.availableKinds, ['cpu', 'allocation']);
   assert.equal(report.items[0].selfPercent, 20);
   assert.equal(report.items[0].primaryCaller.name, 'main.caller');
+  assert.equal(report.items[0].primaryCallees[0].name, 'main.callee');
   assert.equal(report.items[1].cumulative, 70);
 });
 
@@ -64,6 +71,21 @@ test('calculates a matching baseline delta', () => {
   assert.equal(report.items[0].baselineDelta, -20);
   assert.ok(Math.abs(report.items[0].baselineDeltaPercent - (-100 / 3)) < 1e-9);
   assert.equal(report.items[1].baselineDelta, undefined);
+});
+
+test('selects the matching metric from investigation baselines', () => {
+  const cpuBaseline = session('cpu-before', 'cpu', 20, 60);
+  const allocBaseline = session('alloc-before', 'alloc_space', 10, 50);
+  const allocCurrent = session('alloc-after', 'alloc_space', 10, 25);
+  allocBaseline.captureMode = 'delta';
+  allocCurrent.captureMode = 'delta';
+  const report = collectFunctionEvidence(
+    fn,
+    [allocCurrent, cpuBaseline, allocBaseline],
+    [cpuBaseline.id, allocBaseline.id]
+  );
+
+  assert.equal(report.items[0].baselineDelta, -25);
 });
 
 test('falls back to the Go symbol name when source paths are unavailable', () => {

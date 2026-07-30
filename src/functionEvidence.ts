@@ -6,6 +6,7 @@ import {
   SourceLocation
 } from './model';
 import { evidenceKind } from './investigation';
+import { sourcePathsMatch } from './sourcePath';
 
 export interface FunctionEvidenceItem {
   sessionId: string;
@@ -25,6 +26,11 @@ export interface FunctionEvidenceItem {
     value: number;
     location?: SourceLocation;
   };
+  primaryCallees: Array<{
+    name: string;
+    value: number;
+    location?: SourceLocation;
+  }>;
   hotspot: Hotspot;
 }
 
@@ -37,20 +43,31 @@ export interface FunctionEvidenceReport {
 export function collectFunctionEvidence(
   fn: GoFunctionReference,
   sessions: ProfileSession[],
-  baselineSessionId?: string
+  baselineSessionIds?: string | string[],
+  sourcePathMappings: Record<string, string> = {}
 ): FunctionEvidenceReport {
-  const baseline = sessions.find((session) => session.id === baselineSessionId);
+  const baselineIds = new Set(
+    typeof baselineSessionIds === 'string'
+      ? [baselineSessionIds]
+      : baselineSessionIds ?? []
+  );
+  const baselines = sessions.filter((session) => baselineIds.has(session.id));
   const items = sessions.flatMap((session): FunctionEvidenceItem[] => {
-    const hotspot = findFunctionHotspot(fn, session);
+    const hotspot = findFunctionHotspot(fn, session, sourcePathMappings);
     if (!hotspot) return [];
+    const baseline = baselines.find((candidate) =>
+      candidate.id !== session.id
+      && comparableSessions(candidate, session)
+    );
     const baselineHotspot = baseline
       && baseline.sampleType === session.sampleType
       && baseline.sampleUnit === session.sampleUnit
-      ? findFunctionHotspot(fn, baseline)
+      ? findFunctionHotspot(fn, baseline, sourcePathMappings)
       : undefined;
     const baselineDelta = baselineHotspot && baseline?.id !== session.id
       ? hotspot.cumulative - baselineHotspot.cumulative
       : undefined;
+    const callContext = findCallContext(session, hotspot);
     return [{
       sessionId: session.id,
       sessionName: session.name,
@@ -66,7 +83,8 @@ export function collectFunctionEvidence(
       baselineDeltaPercent: baselineDelta === undefined || !baselineHotspot?.cumulative
         ? undefined
         : baselineDelta / baselineHotspot.cumulative * 100,
-      primaryCaller: findPrimaryCaller(session, hotspot),
+      primaryCaller: callContext.primaryCaller,
+      primaryCallees: callContext.primaryCallees,
       hotspot
     }];
   });
@@ -77,14 +95,35 @@ export function collectFunctionEvidence(
   };
 }
 
+function comparableSessions(left: ProfileSession, right: ProfileSession): boolean {
+  if (left.sampleType !== right.sampleType || left.sampleUnit !== right.sampleUnit) return false;
+  if (left.target && right.target && left.target !== right.target) return false;
+  if (left.scenarioId && right.scenarioId && left.scenarioId !== right.scenarioId) return false;
+  if (
+    left.captureDurationMs
+    && right.captureDurationMs
+    && left.captureDurationMs !== right.captureDurationMs
+  ) {
+    return false;
+  }
+  if (
+    /^alloc_/.test(right.sampleType)
+    && (left.captureMode !== 'delta' || right.captureMode !== 'delta')
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function findFunctionHotspot(
   fn: GoFunctionReference,
-  session: ProfileSession
+  session: ProfileSession,
+  sourcePathMappings: Record<string, string> = {}
 ): Hotspot | undefined {
   const bySource = session.hotspots
     .filter((hotspot) =>
       hotspot.location
-      && sameSource(fn.file, hotspot.location.file)
+      && sourcePathsMatch(fn.file, hotspot.location.file, sourcePathMappings)
       && hotspot.location.line >= fn.startLine
       && hotspot.location.line <= fn.endLine
     )
@@ -95,8 +134,13 @@ export function findFunctionHotspot(
     .sort((left, right) => right.cumulative - left.cumulative)[0];
 }
 
-function findPrimaryCaller(session: ProfileSession, hotspot: Hotspot): FunctionEvidenceItem['primaryCaller'] {
-  let result: FunctionEvidenceItem['primaryCaller'];
+function findCallContext(
+  session: ProfileSession,
+  hotspot: Hotspot
+): Pick<FunctionEvidenceItem, 'primaryCaller' | 'primaryCallees'> {
+  let primaryCaller: FunctionEvidenceItem['primaryCaller'];
+  let primaryCallees: FunctionEvidenceItem['primaryCallees'] = [];
+  let bestCalleeValue = -1;
   const visit = (
     nodes: ProfileSession['callTree'],
     parent?: { name: string; value: number; location?: SourceLocation }
@@ -105,15 +149,29 @@ function findPrimaryCaller(session: ProfileSession, hotspot: Hotspot): FunctionE
       if (
         (node.id === hotspot.id || node.name === hotspot.name)
         && parent
-        && (!result || parent.value > result.value)
+        && parent.value > (primaryCaller?.value ?? -1)
       ) {
-        result = parent;
+        primaryCaller = parent;
+      }
+      if (
+        (node.id === hotspot.id || node.name === hotspot.name)
+        && node.value > bestCalleeValue
+      ) {
+        bestCalleeValue = node.value;
+        primaryCallees = [...node.children]
+          .sort((left, right) => right.value - left.value)
+          .slice(0, 5)
+          .map((child) => ({
+            name: child.name,
+            value: child.value,
+            location: child.location
+          }));
       }
       visit(node.children, { name: node.name, value: node.value, location: node.location });
     }
   };
   visit(session.callTree);
-  return result;
+  return { primaryCaller, primaryCallees };
 }
 
 function functionNameMatches(profileName: string, symbolName: string): boolean {
@@ -124,11 +182,4 @@ function functionNameMatches(profileName: string, symbolName: string): boolean {
 
 function percent(value: number, total: number): number {
   return total === 0 ? 0 : value / total * 100;
-}
-
-function sameSource(left: string, right: string): boolean {
-  const normalize = (value: string) => value.replaceAll('\\', '/');
-  const a = normalize(left);
-  const b = normalize(right);
-  return a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
 }

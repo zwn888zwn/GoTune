@@ -3,6 +3,7 @@
 .gitignore
 docs/**
 test/**
+helper/**/*_test.go
 src/**
 node_modules/**
 tsconfig.json

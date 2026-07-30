@@ -73,16 +73,32 @@ export interface Investigation {
   captureIds: string[];
   findings: PerformanceFinding[];
   baselineByMetric: Record<string, string>;
+  targetFindingId?: string;
   createdAt: number;
   updatedAt: number;
 }
 
 export type WorkloadKind = 'manual' | 'vscode-task' | 'command' | 'benchmark';
 
+export interface ScenarioRunRecord {
+  id: string;
+  startedAt: number;
+  finishedAt: number;
+  target?: string;
+  captureIds: string[];
+  metrics: Record<string, number>;
+  gitCommit?: string;
+  gitDirty?: boolean;
+  gitDiffSummary?: string;
+}
+
 export interface PerformanceScenario {
   id: string;
   name: string;
   target?: string;
+  targetDirectory?: string;
+  launchConfiguration?: string;
+  launchWorkspaceFolder?: string;
   problem: ProblemKind;
   workloadKind: WorkloadKind;
   workload?: string;
@@ -90,6 +106,28 @@ export interface PerformanceScenario {
   captureSeconds: number;
   captureKinds: EvidenceKind[];
   successMetrics: string[];
+  metricsAdapter?: {
+    kind: 'json-command' | 'regex-command' | 'prometheus';
+    command?: string;
+    patterns?: Record<string, string>;
+    urls?: Record<string, string>;
+  };
+  runs?: ScenarioRunRecord[];
+  benchmarkCount?: number;
+  benchmarkTime?: string;
+  benchmarkBaseline?: {
+    capturedAt: number;
+    gitCommit?: string;
+    gitDirty?: boolean;
+    measurements: Array<{
+      name: string;
+      samples: number;
+      iterations: number;
+      nsPerOp?: number;
+      bytesPerOp?: number;
+      allocsPerOp?: number;
+    }>;
+  };
   createdAt: number;
   updatedAt: number;
 }

@@ -27,6 +27,11 @@ test('optionally enables mutex and block sampling', () => {
   assert.match(source, /runtime\.SetMutexProfileFraction\(1\)/);
 });
 
+test('can bind the injected profiler to a known launch port', () => {
+  const source = createAgentSource('test-token', false, '127.0.0.1:43123');
+  assert.match(source, /net\.Listen\("tcp", "127\.0\.0\.1:43123"\)/);
+});
+
 test('runs Unix targets in a process group and signals the whole group', () => {
   const signals = [];
   const childSignals = [];

@@ -4,6 +4,10 @@
   "description": "Source-centered Go performance analysis for VS Code.",
   "version": "0.6.0",
   "publisher": "gotune",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zwn888zwn/GoTune.git"
+  },
   "license": "MIT",
   "engines": {
     "vscode": "^1.100.0"
@@ -75,6 +79,16 @@
         "command": "gotune.runWithProfiler",
         "title": "GoTune: Run with Profiler",
         "icon": "$(run)"
+      },
+      {
+        "command": "gotune.startInvestigation",
+        "title": "GoTune: Investigate a Performance Problem",
+        "icon": "$(search)"
+      },
+      {
+        "command": "gotune.runLaunchWithProfiler",
+        "title": "GoTune: Run Launch Configuration with Profiler",
+        "icon": "$(debug-start)"
       },
       {
         "command": "gotune.stopProfilerTarget",
@@ -153,6 +167,10 @@
         "title": "GoTune: Inspect Current Function"
       },
       {
+        "command": "gotune.inspectStructLayout",
+        "title": "GoTune: Inspect Struct Memory Layout"
+      },
+      {
         "command": "gotune.createScenario",
         "title": "GoTune: Create Performance Scenario",
         "icon": "$(add)"
@@ -174,6 +192,14 @@
       {
         "command": "gotune.showFindingSource",
         "title": "GoTune: Open Finding Source"
+      },
+      {
+        "command": "gotune.openFindingEvidence",
+        "title": "GoTune: Open Finding Evidence"
+      },
+      {
+        "command": "gotune.nextFindingAction",
+        "title": "GoTune: Next Action for Finding"
       },
       {
         "command": "gotune.setBaseline",
@@ -254,13 +280,13 @@
           "group": "gotune@2"
         },
         {
-          "command": "gotune.showSource",
-          "when": "view == gotune.findings && viewItem == gotuneHotspot",
+          "command": "gotune.openFindingEvidence",
+          "when": "view == gotune.findings && viewItem == gotuneFinding",
           "group": "inline@1"
         },
         {
-          "command": "gotune.analyzeEscape",
-          "when": "view == gotune.findings && viewItem == gotuneHotspot && gotune.activeProfileKind == allocation",
+          "command": "gotune.nextFindingAction",
+          "when": "view == gotune.findings && viewItem == gotuneFinding",
           "group": "inline@2"
         },
         {
@@ -279,6 +305,11 @@
           "command": "gotune.inspectCurrentFunction",
           "when": "editorLangId == go",
           "group": "navigation@90"
+        },
+        {
+          "command": "gotune.inspectStructLayout",
+          "when": "editorLangId == go",
+          "group": "navigation@91"
         },
         {
           "command": "gotune.runWithProfiler",
@@ -365,6 +396,14 @@
           "type": "boolean",
           "default": false,
           "description": "Enable Go block and mutex sampling in Run with Profiler. This adds runtime overhead."
+        },
+        "gotune.sourcePathMappings": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Map remote or container source prefixes from pprof to local workspace paths, for example /app/src -> /Users/me/project."
         }
       }
     }
