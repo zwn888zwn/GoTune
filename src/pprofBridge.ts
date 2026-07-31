@@ -288,14 +288,16 @@ function pprofBridgeScript(): string {
     const normalized = normalize(functionName);
     const shortName = normalized.split('/').at(-1);
     const nodes = [...document.querySelectorAll('#graph g.node')];
-    return nodes.find((node) => normalize(graphFunction(node)) === normalized)
-      || nodes.find((node) => {
-        const candidate = normalize(graphFunction(node));
-        const candidateShort = candidate.split('/').at(-1);
-        return candidate.endsWith('.' + normalized)
-          || normalized.endsWith('.' + candidate)
-          || candidateShort === shortName;
-      });
+    const exact = nodes.find((node) => normalize(graphFunction(node)) === normalized);
+    if (exact) return exact;
+    const matches = nodes.filter((node) => {
+      const candidate = normalize(graphFunction(node));
+      const candidateShort = candidate.split('/').at(-1);
+      return candidate.endsWith('.' + normalized)
+        || normalized.endsWith('.' + candidate)
+        || candidateShort === shortName;
+    });
+    return matches.length === 1 ? matches[0] : undefined;
   };
   const graphNodeKey = (node) => node?.querySelector(':scope > title')?.textContent?.trim() || '';
   const clearGraphFocus = () => {
@@ -460,6 +462,26 @@ function pprofBridgeScript(): string {
       results: flameMatches.map((box) => flameFunction(box))
     });
   };
+  const setFlamePivot = (functionName) => {
+    const url = new URL(document.URL);
+    const name = String(functionName || '').replace(/\s*\(inlined\)\s*$/, '').trim();
+    if (name) {
+      const escaped = name.replace(/([\\.?+*\[\](){}|^$])/g, '\\$1');
+      url.searchParams.set('p', '^' + escaped + '$');
+    } else {
+      url.searchParams.delete('p');
+    }
+    history.pushState('', '', url.toString());
+    flameMatches = [];
+    flameMatchIndex = -1;
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    host({
+      command: 'search-position',
+      view: 'flame',
+      index: -1,
+      total: 0
+    });
+  };
   const sourceLocation = (target) => {
     const source = target.closest?.('#content.source span.livesrc, #content.source span.nop');
     if (source) {
@@ -563,6 +585,10 @@ function pprofBridgeScript(): string {
       }
       return;
     }
+    if (message.command === 'flame-reset') {
+      setFlamePivot('');
+      return;
+    }
     if (message.command === 'focus-function' || message.command === 'search') {
       if (message.command === 'focus-function' && graphSvg()) {
         const delays = [50, 200, 500, 1000];
@@ -580,7 +606,11 @@ function pprofBridgeScript(): string {
         return;
       }
       if (document.querySelector('#flamegraph,.boxbg')) {
-        searchFlame(message.command === 'focus-function' ? message.functionName : message.query);
+        if (message.command === 'focus-function') {
+          setFlamePivot(message.functionName);
+        } else {
+          searchFlame(message.query);
+        }
         return;
       }
       const search = document.getElementById('search');

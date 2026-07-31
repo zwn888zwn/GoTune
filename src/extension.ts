@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import { runGoBenchmark } from './benchmark';
 import { BenchmarkSnapshot, showBenchmarkPanel } from './benchmarkView';
-import { isRuntimeLine } from './classify';
+import { classifyProfileLineMetrics } from './classify';
 import { compareProfiles } from './compare';
 import { analyzeEscapes, resolveSourceFile } from './escape';
 import {
@@ -3262,20 +3262,24 @@ export function activate(context: vscode.ExtensionContext): void {
     session: ProfileSession,
     requestedName: string
   ): SourceLocation | undefined {
-    const name = requestedName.replace(/\s*\(inlined\)\s*$/, '').trim();
+    const normalize = (value: string): string =>
+      value.replace(/\s*\(inlined\)\s*$/, '').trim();
+    const name = normalize(requestedName);
     const exact = session.hotspots.find((hotspot) =>
-      hotspot.name === name && hotspot.location
+      normalize(hotspot.name) === name && hotspot.location
     );
     if (exact?.location) return exact.location;
     const exactLine = session.lineMetrics.find((metric) =>
-      metric.functionName === name
+      normalize(metric.functionName) === name
     );
     if (exactLine) return { file: exactLine.file, line: exactLine.line };
-    const suffix = session.hotspots.find((hotspot) =>
-      hotspot.location
-      && (hotspot.name.endsWith(`.${name}`) || name.endsWith(`.${hotspot.name}`))
-    );
-    return suffix?.location;
+    const suffixes = session.hotspots.filter((hotspot) => {
+      if (!hotspot.location) return false;
+      const candidate = normalize(hotspot.name);
+      return candidate.endsWith(`.${name}`) || name.endsWith(`.${candidate}`);
+    });
+    if (suffixes.length !== 1) return undefined;
+    return suffixes[0].location;
   }
 
   async function captureCurrentFunctionOverview(fn: GoFunctionReference): Promise<void> {
@@ -3663,30 +3667,13 @@ function profileHeatLines(document: vscode.TextDocument): Array<{
     hot: boolean;
   }>>();
   for (const session of evidenceSessions) {
-    const candidates = [...session.lineMetrics]
-      .filter((metric) =>
-        metric.value > 0
-        && !isRuntimeLine(metric)
-        && sameSource(uri.fsPath, metric.file)
-      )
-      .sort((left, right) =>
-        Math.max(right.flat ?? 0, right.value) - Math.max(left.flat ?? 0, left.value)
-      );
-    const hottestScore = candidates.length > 0
-      ? Math.max(candidates[0].flat ?? 0, candidates[0].value)
-      : 0;
-    const importantMetrics = candidates
-      .filter((metric, index) => {
-        const score = Math.max(metric.flat ?? 0, metric.value);
-        const share = session.total ? score / session.total : 0;
-        return index === 0 || score >= hottestScore * 0.08 || share >= 0.005;
-      })
+    const importantMetrics = classifyProfileLineMetrics(session.lineMetrics, session.total)
+      .filter(({ metric }) => sameSource(uri.fsPath, metric.file))
+      .sort((left, right) => right.score - left.score)
       .slice(0, 8);
-    for (const [rank, metric] of importantMetrics.entries()) {
+    for (const { metric, hot } of importantMetrics) {
       const line = Math.max(0, Math.min(document.lineCount - 1, metric.line - 1));
       const kind = profileEvidenceKind(session.sampleType);
-      const score = Math.max(metric.flat ?? 0, metric.value);
-      const hot = rank === 0 || (rank < 3 && score >= hottestScore * 0.45);
       const entries = grouped.get(line) ?? [];
       if (!entries.some((entry) => entry.session.sampleType === session.sampleType)) {
         entries.push({ session, metric, kind, hot });

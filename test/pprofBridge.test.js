@@ -64,6 +64,11 @@ test('injects a non-invasive IDE bridge into official pprof HTML', () => {
   assert.match(bridged, /search-results/);
   assert.match(bridged, /searchGraph/);
   assert.match(bridged, /searchFlame/);
+  assert.match(bridged, /setFlamePivot/);
+  assert.match(bridged, /url\.searchParams\.set\('p'/);
+  assert.match(bridged, /url\.searchParams\.delete\('p'\)/);
+  assert.match(bridged, /new PopStateEvent\('popstate'\)/);
+  assert.match(bridged, /message\.command === 'flame-reset'/);
   assert.match(bridged, /search-position/);
   assert.match(bridged, /search-step/);
   assert.match(bridged, /event\.ctrlKey \|\| event\.metaKey/);

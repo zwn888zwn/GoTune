@@ -720,7 +720,10 @@ function viewerHtml(
     });
     document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>setView(tab.dataset.view)));
     document.querySelectorAll('#graphTools button').forEach(button=>button.addEventListener('click',()=>frame.contentWindow?.postMessage({source:'gotune-host',command:'graph-control',action:button.dataset.action},'*')));
-    document.getElementById('flameReset').addEventListener('click',()=>{pendingFocus=false;frame.src=iframeUrl()});
+    document.getElementById('flameReset').addEventListener('click',()=>{
+      pendingFocus=false;
+      frame.contentWindow?.postMessage({source:'gotune-host',command:'flame-reset'},'*');
+    });
     const syncGraphConfig=()=>{
       configNodeCount.value=String(graphNodeCount);
       configNodeFraction.value=String(graphNodeFraction);
