@@ -58,7 +58,15 @@ test('injects a non-invasive IDE bridge into official pprof HTML', () => {
   assert.match(bridged, /svg\.style\.cursor = 'grab'/);
   assert.match(bridged, /graphDragEndedAt/);
   assert.doesNotMatch(bridged, /graphOverviewApplied/);
-  assert.match(bridged, /if \(flameFunction\(event\.target\) \|\| topFunction\(event\.target\)\) return/);
+  assert.match(bridged, /focusGraphNode/);
+  assert.match(bridged, /clearGraphFocus/);
+  assert.match(bridged, /gotune-related/);
+  assert.match(bridged, /search-results/);
+  assert.match(bridged, /searchGraph/);
+  assert.match(bridged, /searchFlame/);
+  assert.match(bridged, /search-position/);
+  assert.match(bridged, /search-step/);
+  assert.match(bridged, /event\.ctrlKey \|\| event\.metaKey/);
   assert.match(bridged, /scrollbar-width:thin/);
   assert.match(
     bridged,

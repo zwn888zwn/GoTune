@@ -44,12 +44,19 @@ function pprofBridgeScript(): string {
     '#graph g.node text{fill:#f0f3f6!important;font-family:system-ui,sans-serif!important;font-weight:500}',
     '#graph g.node polygon{stroke-width:1.25px!important;filter:saturate(.62) brightness(.64) drop-shadow(0 3px 5px rgba(0,0,0,.38))}',
     '#graph g.node.gotune-target polygon{stroke:var(--gotune-selection,#4daafc)!important;stroke-width:4px!important;filter:drop-shadow(0 0 7px var(--gotune-selection,#4daafc))}',
+    '#graph g.node.gotune-dim,#graph g.edge.gotune-dim{opacity:.16!important}',
+    '#graph g.node.gotune-related polygon{stroke:var(--gotune-selection,#4daafc)!important;stroke-width:2px!important}',
+    '#graph g.edge.gotune-related path{stroke:var(--gotune-selection,#4daafc)!important;stroke-width:2px!important;stroke-opacity:1!important}',
+    '#graph g.edge.gotune-related polygon{stroke:var(--gotune-selection,#4daafc)!important;fill:var(--gotune-selection,#4daafc)!important}',
+    '#graph g.node.gotune-search-match polygon{stroke:#f2cc60!important;stroke-width:3px!important}',
     '#stack-holder,#current-details{background:var(--gotune-bg,#1e1e1e)!important;color:var(--gotune-fg,#cccccc)!important}',
     '#stack-chart{background-image:linear-gradient(var(--gotune-border,#343b43) 1px,transparent 1px);background-size:100% 20px}',
     '.boxbg{border-right:1px solid var(--gotune-bg,#1e1e1e)!important;border-top-color:rgba(255,255,255,.24)!important;filter:saturate(1.2) brightness(.72)}',
     '.boxtext{color:#fff!important;font-family:system-ui,sans-serif!important;font-size:12px!important;font-weight:500;text-shadow:0 1px 1px rgba(0,0,0,.55)}',
     '.separator{color:var(--gotune-fg,#cccccc)!important}',
     '.boxbg.hilite,.boxbg.hilite2{box-shadow:inset 0 0 0 2px var(--gotune-selection,#4daafc),0 0 6px var(--gotune-selection,#4daafc)!important;filter:saturate(1.35) brightness(.9)}',
+    '.boxbg.gotune-flame-match{box-shadow:inset 0 0 0 2px #f2cc60!important;filter:saturate(1.3) brightness(.88)}',
+    '.boxbg.gotune-flame-current{box-shadow:inset 0 0 0 3px var(--gotune-selection,#4daafc),0 0 7px var(--gotune-selection,#4daafc)!important;filter:saturate(1.35) brightness(.95)}',
     '#toptable th{background:var(--gotune-header,#252526)!important;color:var(--gotune-fg,#cccccc)!important}',
     '#toptable td,#toptable th{border-color:var(--gotune-border,#3c3c3c)!important}',
     '#toptable tr:hover td{background:var(--gotune-hover,#2a2d2e)!important}',
@@ -176,6 +183,7 @@ function pprofBridgeScript(): string {
   };
   let initialGraphViewBox;
   let graphDragEndedAt = 0;
+  let graphClickTimer;
   const graphSvg = () => document.querySelector('#graph svg');
   const installGraphPan = (svg) => {
     if (!svg || svg.dataset.gotunePan) return;
@@ -289,12 +297,75 @@ function pprofBridgeScript(): string {
           || candidateShort === shortName;
       });
   };
+  const graphNodeKey = (node) => node?.querySelector(':scope > title')?.textContent?.trim() || '';
+  const clearGraphFocus = () => {
+    document.querySelectorAll('#graph g.node,#graph g.edge').forEach((item) => {
+      item.classList.remove('gotune-target', 'gotune-related', 'gotune-dim');
+    });
+  };
+  const focusGraphNode = (node) => {
+    if (!node) return false;
+    clearGraphFocus();
+    const key = graphNodeKey(node);
+    const relatedKeys = new Set([key]);
+    const relatedEdges = new Set();
+    if (key) {
+      for (const edge of document.querySelectorAll('#graph g.edge')) {
+        const title = edge.querySelector(':scope > title')?.textContent?.trim() || '';
+        const parts = title.split('->').map((part) => part.trim());
+        if (parts.length === 2 && parts.includes(key)) {
+          relatedKeys.add(parts[0]);
+          relatedKeys.add(parts[1]);
+          relatedEdges.add(edge);
+        }
+      }
+    }
+    for (const candidate of document.querySelectorAll('#graph g.node')) {
+      const related = candidate === node || relatedKeys.has(graphNodeKey(candidate));
+      candidate.classList.toggle('gotune-dim', !related);
+      candidate.classList.toggle('gotune-related', related && candidate !== node);
+    }
+    for (const edge of document.querySelectorAll('#graph g.edge')) {
+      edge.classList.toggle('gotune-related', relatedEdges.has(edge));
+      edge.classList.toggle('gotune-dim', !relatedEdges.has(edge));
+    }
+    node.classList.add('gotune-target');
+    centerGraphNode(graphFunction(node));
+    return true;
+  };
+  const compileSearch = (query) => {
+    if (!query) return undefined;
+    try {
+      return new RegExp(query, 'i');
+    } catch {
+      const escaped = String(query).replace(/([\\.?+*\[\](){}|^$])/g, '\\$1');
+      return new RegExp(escaped, 'i');
+    }
+  };
+  const searchGraph = (query) => {
+    const expression = compileSearch(String(query || '').trim());
+    const results = [];
+    document.querySelectorAll('#graph g.node.gotune-search-match')
+      .forEach((item) => item.classList.remove('gotune-search-match'));
+    if (expression) {
+      for (const node of document.querySelectorAll('#graph g.node')) {
+        const name = graphFunction(node);
+        if (name && expression.test(name)) {
+          node.classList.add('gotune-search-match');
+          if (!results.includes(name)) results.push(name);
+        }
+      }
+    }
+    host({ command: 'search-results', view: 'graph', query: String(query || ''), results });
+    return results;
+  };
   const graphControl = (action) => {
     const svg = graphSvg();
     if (!svg) return;
     rememberGraphViewBox();
     const box = svg.viewBox.baseVal;
     if (action === 'fit' && initialGraphViewBox) {
+      clearGraphFocus();
       box.x = initialGraphViewBox.x;
       box.y = initialGraphViewBox.y;
       box.width = initialGraphViewBox.width;
@@ -353,6 +424,42 @@ function pprofBridgeScript(): string {
     const name = detail.includes('│') ? detail.split('│').at(-1) : detail;
     return name.replace(/\s*\(inlined\)\s*$/, '').trim();
   };
+  let flameMatches = [];
+  let flameMatchIndex = -1;
+  const revealFlameMatch = (index) => {
+    document.querySelectorAll('.boxbg.gotune-flame-current')
+      .forEach((item) => item.classList.remove('gotune-flame-current'));
+    if (flameMatches.length === 0) {
+      flameMatchIndex = -1;
+    } else {
+      flameMatchIndex = (index + flameMatches.length) % flameMatches.length;
+      const match = flameMatches[flameMatchIndex];
+      match.classList.add('gotune-flame-current');
+      match.scrollIntoView({ block: 'center', inline: 'center' });
+    }
+    host({
+      command: 'search-position',
+      view: 'flame',
+      index: flameMatchIndex,
+      total: flameMatches.length
+    });
+  };
+  const searchFlame = (query) => {
+    const expression = compileSearch(String(query || '').trim());
+    document.querySelectorAll('.boxbg.gotune-flame-match,.boxbg.gotune-flame-current')
+      .forEach((item) => item.classList.remove('gotune-flame-match', 'gotune-flame-current'));
+    flameMatches = expression
+      ? [...document.querySelectorAll('.boxbg')].filter((box) => expression.test(flameFunction(box)))
+      : [];
+    flameMatches.forEach((box) => box.classList.add('gotune-flame-match'));
+    revealFlameMatch(flameMatches.length > 0 ? 0 : -1);
+    host({
+      command: 'search-results',
+      view: 'flame',
+      query: String(query || ''),
+      results: flameMatches.map((box) => flameFunction(box))
+    });
+  };
   const sourceLocation = (target) => {
     const source = target.closest?.('#content.source span.livesrc, #content.source span.nop');
     if (source) {
@@ -389,6 +496,23 @@ function pprofBridgeScript(): string {
       event.stopImmediatePropagation();
       return;
     }
+    const graphNode = event.target.closest?.('#graph g.node');
+    if (graphNode) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const functionName = graphFunction(graphNode);
+      if (!functionName) return;
+      clearTimeout(graphClickTimer);
+      graphClickTimer = setTimeout(() => {
+        focusGraphNode(graphNode);
+        host({ command: 'selected-function', functionName });
+      }, 180);
+      return;
+    }
+    if (event.target.closest?.('#graph svg')) {
+      clearGraphFocus();
+      return;
+    }
     const functionName = functionAt(event.target);
     if (!functionName) return;
     host({ command: 'selected-function', functionName });
@@ -400,9 +524,23 @@ function pprofBridgeScript(): string {
       host({ command: 'open-source', ...location });
       return;
     }
-    if (flameFunction(event.target) || topFunction(event.target)) return;
+    const flameName = flameFunction(event.target);
+    if (flameName) {
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        host({ command: 'open-function', functionName: flameName });
+      }
+      return;
+    }
+    if (topFunction(event.target)) return;
     const functionName = graphFunction(event.target);
-    if (functionName) host({ command: 'open-function', functionName });
+    if (functionName) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      clearTimeout(graphClickTimer);
+      host({ command: 'open-function', functionName });
+    }
   }, true);
   window.addEventListener('message', (event) => {
     const message = event.data;
@@ -419,15 +557,30 @@ function pprofBridgeScript(): string {
       graphControl(message.action);
       return;
     }
+    if (message.command === 'search-step') {
+      if (flameMatches.length > 0) {
+        revealFlameMatch(flameMatchIndex + Number(message.delta || 1));
+      }
+      return;
+    }
     if (message.command === 'focus-function' || message.command === 'search') {
       if (message.command === 'focus-function' && graphSvg()) {
         const delays = [50, 200, 500, 1000];
         delays.forEach((delay, index) => setTimeout(() => {
-          if (centerGraphNode(message.functionName)) return;
+          const node = graphNodeFor(message.functionName);
+          if (node && focusGraphNode(node)) return;
           if (index === delays.length - 1) {
             host({ command: 'focus-missed', functionName: message.functionName });
           }
         }, delay));
+        return;
+      }
+      if (graphSvg()) {
+        searchGraph(message.command === 'focus-function' ? message.functionName : message.query);
+        return;
+      }
+      if (document.querySelector('#flamegraph,.boxbg')) {
+        searchFlame(message.command === 'focus-function' ? message.functionName : message.query);
         return;
       }
       const search = document.getElementById('search');

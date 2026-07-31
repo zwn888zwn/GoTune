@@ -147,6 +147,49 @@ class HotspotCodeLensProvider implements vscode.CodeLensProvider {
   }
 }
 
+interface ProfileLineDrillDown {
+  sessionId: string;
+  functionName: string;
+  file: string;
+  line: number;
+  value: number;
+  flat?: number;
+}
+
+class ProfileHeatInlayHintProvider implements vscode.InlayHintsProvider {
+  private readonly emitter = new vscode.EventEmitter<void>();
+  readonly onDidChangeInlayHints = this.emitter.event;
+
+  refresh(): void {
+    this.emitter.fire();
+  }
+
+  provideInlayHints(
+    document: vscode.TextDocument,
+    range: vscode.Range
+  ): vscode.InlayHint[] {
+    return profileHeatLines(document)
+      .filter(({ line }) => line >= range.start.line && line <= range.end.line)
+      .map(({ line, text, hot, hover, drillDown }) => {
+        const part = new vscode.InlayHintLabelPart(`${hot ? '🔥 ' : ''}${text}`);
+        part.tooltip = hover;
+        part.command = {
+          command: 'gotune.drillDownProfileLine',
+          title: '在 pprof 中查看这行代码',
+          arguments: [drillDown]
+        };
+        const hint = new vscode.InlayHint(
+          document.lineAt(line).range.end,
+          [part],
+          vscode.InlayHintKind.Type
+        );
+        hint.paddingLeft = true;
+        hint.tooltip = hover;
+        return hint;
+      });
+  }
+}
+
 class FunctionEvidenceCodeActionProvider implements vscode.CodeActionProvider {
   async provideCodeActions(
     document: vscode.TextDocument,
@@ -235,6 +278,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let cpuRecordingStartedAt: number | undefined;
   const goroutineTracker = new GoroutineTracker();
   const codeLensProvider = new HotspotCodeLensProvider();
+  const heatHintProvider = new ProfileHeatInlayHintProvider();
   const runningProvider = new PerformanceTreeProvider<vscode.TreeItem>(() =>
     runningItems(runner.snapshot, cpuRecordingStartedAt)
   );
@@ -300,6 +344,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       if (event.affectsConfiguration('gotune.sourcePathMappings')) {
         codeLensProvider.refresh();
+        heatHintProvider.refresh();
         for (const editor of vscode.window.visibleTextEditors) {
           if (editor.document.languageId === 'go') {
             applyProfileHeatToEditor(editor, heatDecoration, heatLabelDecoration);
@@ -938,6 +983,40 @@ export function activate(context: vscode.ExtensionContext): void {
       setActive(selected.session);
       void showSessionProfile(selected.session, selected.hotspot);
     }),
+    vscode.commands.registerCommand(
+      'gotune.drillDownProfileLine',
+      async (drillDown?: ProfileLineDrillDown) => {
+        if (!drillDown) return;
+        const session = sessions.find((candidate) => candidate.id === drillDown.sessionId);
+        if (!session) {
+          void vscode.window.showInformationMessage(
+            'GoTune：这条行级提示对应的 Profile 已不存在，请重新采集。'
+          );
+          return;
+        }
+        const normalizedName = drillDown.functionName.replace(/\s*\(inlined\)\s*$/, '').trim();
+        const hotspot = session.hotspots.find((candidate) =>
+          candidate.name.replace(/\s*\(inlined\)\s*$/, '').trim() === normalizedName
+        ) ?? {
+          id: `line:${drillDown.file}:${drillDown.line}`,
+          name: normalizedName,
+          flat: drillDown.flat ?? 0,
+          cumulative: drillDown.value,
+          location: { file: drillDown.file, line: drillDown.line }
+        };
+        setActive(session);
+        await showSessionProfile(session, hotspot);
+        const location = pprofFunctionLocation(session, normalizedName) ?? hotspot.location;
+        if (location) {
+          await openSource(
+            location.file,
+            location.line,
+            heatDecoration,
+            heatLabelDecoration
+          );
+        }
+      }
+    ),
     vscode.commands.registerCommand('gotune.inspectCurrentFunction', async (requested?: GoFunctionReference) => {
       const fn = isGoFunctionReference(requested) ? requested : await functionAtEditor();
       if (!fn) {
@@ -1372,6 +1451,7 @@ export function activate(context: vscode.ExtensionContext): void {
       sessionProvider.refresh();
       investigationProvider.refresh();
       codeLensProvider.refresh();
+      heatHintProvider.refresh();
       void refreshFindingDiagnostics();
       void vscode.window.showInformationMessage(`GoTune: ${session.name} is now the baseline.`);
     }),
@@ -1418,8 +1498,13 @@ export function activate(context: vscode.ExtensionContext): void {
       investigationProvider.refresh();
       findingsProvider.refresh();
       codeLensProvider.refresh();
+      heatHintProvider.refresh();
     }),
     vscode.languages.registerCodeLensProvider({ language: 'go', scheme: 'file' }, codeLensProvider),
+    vscode.languages.registerInlayHintsProvider(
+      { language: 'go', scheme: 'file' },
+      heatHintProvider
+    ),
     vscode.languages.registerCodeActionsProvider(
       { language: 'go', scheme: 'file' },
       new FunctionEvidenceCodeActionProvider(),
@@ -1513,6 +1598,7 @@ export function activate(context: vscode.ExtensionContext): void {
     investigationProvider.refresh();
     findingsProvider.refresh();
     codeLensProvider.refresh();
+    heatHintProvider.refresh();
     void refreshFindingDiagnostics();
     for (const editor of vscode.window.visibleTextEditors) {
       if (editor.document.languageId === 'go') {
@@ -1535,6 +1621,7 @@ export function activate(context: vscode.ExtensionContext): void {
     sessionProvider.refresh();
     findingsProvider.refresh();
     codeLensProvider.refresh();
+    heatHintProvider.refresh();
     for (const editor of vscode.window.visibleTextEditors) {
       if (editor.document.languageId === 'go') {
         applyProfileHeatToEditor(editor, heatDecoration, heatLabelDecoration);
@@ -3560,12 +3647,13 @@ async function showRelatedSyncCode(location: SourceLocation): Promise<void> {
   editor.revealRange(selected.reference.range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 }
 
-function applyProfileHeatToEditor(
-  editor: vscode.TextEditor,
-  heatDecoration: vscode.TextEditorDecorationType,
-  heatLabelDecoration: vscode.TextEditorDecorationType
-): void {
-  const document = editor.document;
+function profileHeatLines(document: vscode.TextDocument): Array<{
+  line: number;
+  text: string;
+  hot: boolean;
+  hover: vscode.MarkdownString;
+  drillDown: ProfileLineDrillDown;
+}> {
   const uri = document.uri;
   const evidenceSessions = activeSession ? [activeSession] : [];
   const grouped = new Map<number, Array<{
@@ -3606,9 +3694,8 @@ function applyProfileHeatToEditor(
       }
     }
   }
-  const labels = [...grouped.entries()].map(([line, entries]) => {
+  return [...grouped.entries()].map(([line, entries]) => {
     const metricLine = Math.max(0, Math.min(document.lineCount - 1, line));
-    const lineRange = document.lineAt(metricLine).range;
     const parts = entries.map(({ session, metric, kind }) => {
       const percent = session.total ? metric.value / session.total * 100 : 0;
       if (kind === 'cpu') {
@@ -3639,24 +3726,34 @@ function applyProfileHeatToEditor(
     const isHottest = entries.some((entry) => entry.hot);
     const hover = new vscode.MarkdownString(
       `**${parts.join(' · ')}**\n\n`
-      + '自身：直接发生在这一行的开销。包含下游：执行路径经过这一行后，连同后续调用产生的开销。'
+      + '自身：直接发生在这一行的开销。包含下游：执行路径经过这一行后，连同后续调用产生的开销。\n\n'
+      + '点击可在 pprof 中聚焦该函数并打开对应源码。'
     );
+    const primary = entries[0];
     return {
-      range: new vscode.Range(lineRange.end, lineRange.end),
-      hoverMessage: hover,
-      renderOptions: {
-        after: {
-          contentText: ` ${isHottest ? '🔥 ' : ''}${parts.join(' · ')}`,
-          color: new vscode.ThemeColor(
-            isHottest ? 'charts.red' : 'editorCodeLens.foreground'
-          ),
-          opacity: String(isHottest ? 1 : 0.7)
-        }
+      line: metricLine,
+      text: parts.join(' · '),
+      hot: isHottest,
+      hover,
+      drillDown: {
+        sessionId: primary.session.id,
+        functionName: primary.metric.functionName,
+        file: primary.metric.file,
+        line: primary.metric.line,
+        value: primary.metric.value,
+        flat: primary.metric.flat
       }
     };
   });
+}
+
+function applyProfileHeatToEditor(
+  editor: vscode.TextEditor,
+  heatDecoration: vscode.TextEditorDecorationType,
+  heatLabelDecoration: vscode.TextEditorDecorationType
+): void {
   editor.setDecorations(heatDecoration, []);
-  editor.setDecorations(heatLabelDecoration, labels);
+  editor.setDecorations(heatLabelDecoration, []);
 }
 
 function sameSource(left: string, right: string): boolean {

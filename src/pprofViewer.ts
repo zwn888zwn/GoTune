@@ -398,7 +398,7 @@ function viewerHtml(
     body{display:flex;flex-direction:column;overflow:hidden}.toolbar{height:40px;display:flex;align-items:center;gap:6px;padding:4px 10px;border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editorGroupHeader-tabsBackground)}
     .tabs{display:flex;gap:2px}.tab,.tool{border:0;border-radius:4px;padding:5px 9px;color:var(--vscode-foreground);background:transparent;cursor:pointer}.tab:hover,.tool:hover{background:var(--vscode-toolbar-hoverBackground)}.tab.active{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}.tool.primary{color:var(--vscode-button-foreground);background:var(--vscode-button-background)}
     .spacer{flex:1}.metric{display:flex;align-items:center;gap:6px;color:var(--vscode-descriptionForeground)}select{color:var(--vscode-dropdown-foreground);background:var(--vscode-dropdown-background);border:1px solid var(--vscode-dropdown-border);padding:4px 7px}
-    .search{width:180px;min-width:90px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border);padding:4px 7px}
+    .search-wrap{position:relative;display:flex;align-items:center;gap:3px}.search{width:180px;min-width:90px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border);padding:4px 7px}.search-nav{display:flex;align-items:center;gap:2px}.search-nav[hidden]{display:none}.search-nav button{border:0;border-radius:3px;padding:4px 6px;color:var(--vscode-foreground);background:transparent;cursor:pointer}.search-nav button:hover{background:var(--vscode-toolbar-hoverBackground)}.search-count{min-width:42px;text-align:center;color:var(--vscode-descriptionForeground);font-variant-numeric:tabular-nums}.search-results{position:absolute;z-index:30;top:31px;left:0;width:min(440px,70vw);max-height:280px;overflow:auto;border:1px solid var(--vscode-widget-border,var(--vscode-panel-border));border-radius:5px;background:var(--vscode-editorWidget-background);box-shadow:0 8px 24px rgba(0,0,0,.35)}.search-results[hidden]{display:none}.search-result{display:block;width:100%;padding:6px 9px;overflow:hidden;text-align:left;text-overflow:ellipsis;white-space:nowrap;border:0;color:var(--vscode-foreground);background:transparent;cursor:pointer}.search-result:hover,.search-result.active{color:var(--vscode-list-activeSelectionForeground);background:var(--vscode-list-activeSelectionBackground)}
     .selection{max-width:30%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--vscode-descriptionForeground)}
     .tree-tools{display:flex;align-items:center;gap:8px;color:var(--vscode-descriptionForeground)}.tree-tools[hidden]{display:none}.tree-tools label{display:flex;align-items:center;gap:5px;white-space:nowrap}
     .warning{padding:5px 10px;background:var(--vscode-inputValidation-warningBackground);color:var(--vscode-inputValidation-warningForeground)}
@@ -428,7 +428,15 @@ function viewerHtml(
     <button class="tool" id="open" title="打开所选函数源码" disabled>↗ 打开源码</button>
     <span class="selection" id="selection"></span>
     <span class="spacer"></span>
-    <input class="search" id="search" placeholder="搜索函数（正则）">
+    <div class="search-wrap">
+      <input class="search" id="search" placeholder="搜索函数（正则）">
+      <div class="search-nav" id="searchNav" hidden>
+        <button id="searchPrevious" title="上一个匹配">↑</button>
+        <span class="search-count" id="searchCount">0 / 0</span>
+        <button id="searchNext" title="下一个匹配">↓</button>
+      </div>
+      <div class="search-results" id="searchResults" hidden></div>
+    </div>
     <div class="tree-tools" id="treeTools" hidden>
       <label>占比：<select id="treePercentMode"><option value="total">总量</option><option value="parent">父节点</option></select></label>
       <label><input id="treeSingleClick" type="checkbox">单击打开源码</label>
@@ -453,6 +461,9 @@ function viewerHtml(
       <button data-action="zoom-out" title="缩小">−</button>
       <button data-action="fit" title="适配整个调用图">↔</button>
     </div>
+    <div class="graph-tools" id="flameTools" hidden>
+      <button id="flameReset" title="重置火焰图聚焦">↺</button>
+    </div>
     <iframe id="official" class="view"></iframe>
     <div id="tree" class="view" hidden>
       <div class="tree-header"><span>函数</span><span>自身</span><span id="treeFlatPercent">自身占比</span><span>累计</span><span id="treeCumPercent">累计占比</span></div>
@@ -471,6 +482,9 @@ function viewerHtml(
     const selection = document.getElementById('selection');
     const open = document.getElementById('open');
     const search = document.getElementById('search');
+    const searchNav = document.getElementById('searchNav');
+    const searchCount = document.getElementById('searchCount');
+    const searchResults = document.getElementById('searchResults');
     const configure = document.getElementById('configure');
     const configPanel = document.getElementById('configPanel');
     const configNodeCount = document.getElementById('configNodeCount');
@@ -488,6 +502,10 @@ function viewerHtml(
     let graphEdgeFraction = model.graphEdgeFraction;
     let graphCallTree = model.graphCallTree;
     let graphLocateExpanded = false;
+    let graphSearchResults = [];
+    let graphSearchIndex = -1;
+    let flameSearchIndex = -1;
+    let flameSearchTotal = 0;
     let expanded = new Set(restoredState.expanded||[]);
     search.value=restoredState.search||'';
     treePercentMode.value=restoredState.treePercentMode||'total';
@@ -543,6 +561,33 @@ function viewerHtml(
       if(currentView==='tree'){renderTree();return}
       frame.contentWindow?.postMessage({source:'gotune-host',command:'search',query},'*');
     };
+    const updateSearchControls = () => {
+      const hasQuery=Boolean(search.value.trim());
+      searchNav.hidden=currentView!=='flame'||!hasQuery;
+      searchCount.textContent=flameSearchTotal>0?(flameSearchIndex+1)+' / '+flameSearchTotal:'0 / 0';
+      searchResults.hidden=currentView!=='graph'||!hasQuery||graphSearchResults.length===0;
+    };
+    const selectGraphSearchResult = index => {
+      if(graphSearchResults.length===0)return;
+      graphSearchIndex=(index+graphSearchResults.length)%graphSearchResults.length;
+      const name=graphSearchResults[graphSearchIndex];
+      choose(name);
+      vscode.postMessage({command:'selected-function',functionName:name});
+      focus(name);
+      searchResults.querySelectorAll('.search-result').forEach((item,rowIndex)=>item.classList.toggle('active',rowIndex===graphSearchIndex));
+    };
+    const renderGraphSearchResults = () => {
+      searchResults.textContent='';
+      graphSearchResults.forEach((name,index)=>{
+        const button=document.createElement('button');
+        button.className='search-result';
+        button.textContent=name;
+        button.title=name;
+        button.addEventListener('click',()=>selectGraphSearchResult(index));
+        searchResults.appendChild(button);
+      });
+      updateSearchControls();
+    };
     const choose = name => {
       if(selectedFunction!==(name||''))graphLocateExpanded=false;
       selectedFunction=name||'';selection.textContent=selectedFunction;open.disabled=!selectedFunction;
@@ -554,8 +599,11 @@ function viewerHtml(
       more.value=view==='peek'||view==='source'?view:'';
       tree.hidden=view!=='tree';frame.hidden=view==='tree';
       document.getElementById('graphTools').hidden=view!=='graph';
+      document.getElementById('flameTools').hidden=view!=='flame';
       configure.hidden=view!=='graph';
       treeTools.hidden=view!=='tree';
+      graphSearchResults=[];graphSearchIndex=-1;flameSearchIndex=-1;flameSearchTotal=0;
+      renderGraphSearchResults();
       if(view==='tree'){revealTreeSelection();renderTree()}else{pendingFocus=Boolean(selectedFunction);frame.src=iframeUrl()}
       vscode.postMessage({command:'change-view',view});
     };
@@ -614,7 +662,24 @@ function viewerHtml(
     for(const item of model.sampleTypes){const option=document.createElement('option');option.value=item.name;option.textContent=item.label;option.selected=item.name===model.sampleType;sample.appendChild(option)}
     sample.addEventListener('change',()=>vscode.postMessage({command:'change-sample',sampleType:sample.value}));
     more.addEventListener('change',()=>{if(more.value)setView(more.value)});
-    search.addEventListener('input',()=>{saveState();searchProfile(search.value)});
+    search.addEventListener('input',()=>{
+      graphSearchResults=[];graphSearchIndex=-1;flameSearchIndex=-1;flameSearchTotal=0;
+      saveState();updateSearchControls();searchProfile(search.value)
+    });
+    search.addEventListener('keydown',event=>{
+      if(event.key==='Escape'){
+        search.value='';search.dispatchEvent(new Event('input'));searchResults.hidden=true;return;
+      }
+      if(event.key!=='Enter')return;
+      event.preventDefault();
+      if(currentView==='graph'){
+        selectGraphSearchResult(graphSearchIndex<0?0:graphSearchIndex+(event.shiftKey?-1:1));
+      }else if(currentView==='flame'){
+        frame.contentWindow?.postMessage({source:'gotune-host',command:'search-step',delta:event.shiftKey?-1:1},'*');
+      }
+    });
+    document.getElementById('searchPrevious').addEventListener('click',()=>frame.contentWindow?.postMessage({source:'gotune-host',command:'search-step',delta:-1},'*'));
+    document.getElementById('searchNext').addEventListener('click',()=>frame.contentWindow?.postMessage({source:'gotune-host',command:'search-step',delta:1},'*'));
     treePercentMode.addEventListener('change',()=>{saveState();renderTree()});
     treeSingleClick.addEventListener('change',saveState);
     frame.addEventListener('load',sendTheme);
@@ -623,6 +688,21 @@ function viewerHtml(
       if(message?.source==='gotune-pprof'){
         if(message.command==='selected-function')choose(message.functionName);
         else if(message.command==='open-function'||message.command==='open-source')vscode.postMessage(message);
+        else if(message.command==='search-results'&&message.view===currentView){
+          if(currentView==='graph'){
+            graphSearchResults=[...new Set(message.results||[])];
+            graphSearchIndex=-1;
+            renderGraphSearchResults();
+          }else if(currentView==='flame'){
+            flameSearchTotal=(message.results||[]).length;
+            updateSearchControls();
+          }
+        }
+        else if(message.command==='search-position'&&message.view==='flame'){
+          flameSearchIndex=Number(message.index);
+          flameSearchTotal=Number(message.total);
+          updateSearchControls();
+        }
         else if(message.command==='ready'){sendTheme();if(pendingFocus&&selectedFunction){pendingFocus=false;focus(selectedFunction)}else searchProfile(search.value)}
         else if(message.command==='focus-missed'&&currentView==='graph'){
           if(!graphLocateExpanded){
@@ -640,6 +720,7 @@ function viewerHtml(
     });
     document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>setView(tab.dataset.view)));
     document.querySelectorAll('#graphTools button').forEach(button=>button.addEventListener('click',()=>frame.contentWindow?.postMessage({source:'gotune-host',command:'graph-control',action:button.dataset.action},'*')));
+    document.getElementById('flameReset').addEventListener('click',()=>{pendingFocus=false;frame.src=iframeUrl()});
     const syncGraphConfig=()=>{
       configNodeCount.value=String(graphNodeCount);
       configNodeFraction.value=String(graphNodeFraction);
