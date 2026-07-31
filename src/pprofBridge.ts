@@ -184,6 +184,8 @@ function pprofBridgeScript(): string {
   let initialGraphViewBox;
   let graphDragEndedAt = 0;
   let graphClickTimer;
+  let flameClickTimer;
+  let flameSingleClick = false;
   const graphSvg = () => document.querySelector('#graph svg');
   const installGraphPan = (svg) => {
     if (!svg || svg.dataset.gotunePan) return;
@@ -203,29 +205,32 @@ function pprofBridgeScript(): string {
         height: view.height,
         moved: false
       };
-      svg.setPointerCapture(event.pointerId);
       svg.style.cursor = 'grabbing';
-      event.preventDefault();
-      event.stopImmediatePropagation();
     };
     const pointerMove = (event) => {
       if (!drag) return;
       if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 3) {
+        if (!drag.moved) svg.setPointerCapture(event.pointerId);
         drag.moved = true;
       }
       const view = svg.viewBox.baseVal;
       view.x = drag.viewX - (event.clientX - drag.x) * drag.width / Math.max(1, svg.clientWidth);
       view.y = drag.viewY - (event.clientY - drag.y) * drag.height / Math.max(1, svg.clientHeight);
-      event.preventDefault();
-      event.stopImmediatePropagation();
+      if (drag.moved) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
     };
     const stop = (event) => {
       if (!drag) return;
-      if (drag.moved) graphDragEndedAt = Date.now();
+      const moved = drag.moved;
+      if (moved) graphDragEndedAt = Date.now();
       drag = undefined;
       svg.style.cursor = 'grab';
-      event.preventDefault();
-      event.stopImmediatePropagation();
+      if (moved) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
     };
     const wheel = (event) => {
       if (!event.target.closest?.('#graph')) return;
@@ -525,14 +530,29 @@ function pprofBridgeScript(): string {
       const functionName = graphFunction(graphNode);
       if (!functionName) return;
       clearTimeout(graphClickTimer);
+      host({ command: 'selected-function', functionName });
       graphClickTimer = setTimeout(() => {
         focusGraphNode(graphNode);
-        host({ command: 'selected-function', functionName });
-      }, 180);
+      }, 350);
       return;
     }
     if (event.target.closest?.('#graph svg')) {
+      clearTimeout(graphClickTimer);
       clearGraphFocus();
+      host({ command: 'selected-function', functionName: '' });
+      return;
+    }
+    const flameName = flameFunction(event.target);
+    if (flameName) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      clearTimeout(flameClickTimer);
+      host({ command: 'selected-function', functionName: flameName });
+      if (flameSingleClick) {
+        flameClickTimer = setTimeout(() => {
+          host({ command: 'open-function', functionName: flameName });
+        }, 350);
+      }
       return;
     }
     const functionName = functionAt(event.target);
@@ -548,11 +568,10 @@ function pprofBridgeScript(): string {
     }
     const flameName = flameFunction(event.target);
     if (flameName) {
-      if (event.ctrlKey || event.metaKey) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        host({ command: 'open-function', functionName: flameName });
-      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      clearTimeout(flameClickTimer);
+      setFlamePivot(flameName);
       return;
     }
     if (topFunction(event.target)) return;
@@ -577,6 +596,10 @@ function pprofBridgeScript(): string {
     }
     if (message.command === 'graph-control') {
       graphControl(message.action);
+      return;
+    }
+    if (message.command === 'flame-options') {
+      flameSingleClick = Boolean(message.singleClickOpensSource);
       return;
     }
     if (message.command === 'search-step') {

@@ -57,9 +57,22 @@ test('injects a non-invasive IDE bridge into official pprof HTML', () => {
   assert.match(bridged, /deltaX \* 1\.35/);
   assert.match(bridged, /svg\.style\.cursor = 'grab'/);
   assert.match(bridged, /graphDragEndedAt/);
+  assert.match(bridged, /if \(drag\.moved\) \{\s*event\.preventDefault\(\)/);
+  assert.doesNotMatch(
+    bridged,
+    /svg\.setPointerCapture\(event\.pointerId\);\s*svg\.style\.cursor = 'grabbing'/
+  );
+  assert.match(bridged, /if \(!drag\.moved\) svg\.setPointerCapture\(event\.pointerId\)/);
+  assert.match(bridged, /flameClickTimer/);
+  assert.match(bridged, /flameSingleClick/);
+  assert.match(bridged, /message\.command === 'flame-options'/);
+  assert.match(bridged, /clearTimeout\(flameClickTimer\)/);
+  assert.match(bridged, /setFlamePivot\(flameName\)/);
   assert.doesNotMatch(bridged, /graphOverviewApplied/);
   assert.match(bridged, /focusGraphNode/);
   assert.match(bridged, /clearGraphFocus/);
+  assert.match(bridged, /clearTimeout\(graphClickTimer\);\s*clearGraphFocus\(\)/);
+  assert.match(bridged, /host\(\{ command: 'selected-function', functionName: '' \}\)/);
   assert.match(bridged, /gotune-related/);
   assert.match(bridged, /search-results/);
   assert.match(bridged, /searchGraph/);

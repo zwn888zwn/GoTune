@@ -441,6 +441,9 @@ function viewerHtml(
       <label>占比：<select id="treePercentMode"><option value="total">总量</option><option value="parent">父节点</option></select></label>
       <label><input id="treeSingleClick" type="checkbox">单击打开源码</label>
     </div>
+    <div class="tree-tools" id="flameSettings" hidden>
+      <label><input id="flameSingleClick" type="checkbox">单击打开源码</label>
+    </div>
     <div class="config-wrap">
       <button class="tool" id="configure" title="配置调用图">⚙ Graph 配置</button>
       <div class="config-panel" id="configPanel" hidden>
@@ -494,6 +497,8 @@ function viewerHtml(
     const treeTools = document.getElementById('treeTools');
     const treePercentMode = document.getElementById('treePercentMode');
     const treeSingleClick = document.getElementById('treeSingleClick');
+    const flameSettings = document.getElementById('flameSettings');
+    const flameSingleClick = document.getElementById('flameSingleClick');
     let currentView = model.activeView;
     let selectedFunction = model.selectedFunction;
     let pendingFocus = Boolean(model.selectedFunction);
@@ -510,12 +515,14 @@ function viewerHtml(
     search.value=restoredState.search||'';
     treePercentMode.value=restoredState.treePercentMode||'total';
     treeSingleClick.checked=Boolean(restoredState.treeSingleClick);
+    flameSingleClick.checked=Boolean(restoredState.flameSingleClick);
     const saveState=()=>vscode.setState({
       profileKey:model.profileKey,
       search:search.value,
       expanded:[...expanded],
       treePercentMode:treePercentMode.value,
-      treeSingleClick:treeSingleClick.checked
+      treeSingleClick:treeSingleClick.checked,
+      flameSingleClick:flameSingleClick.checked
     });
     const colors = {
       bg:getComputedStyle(document.body).getPropertyValue('--vscode-editor-background').trim(),
@@ -552,7 +559,14 @@ function viewerHtml(
       }
       return model.proxyUrl + viewPath(currentView) + '?' + params.toString();
     };
-    const sendTheme = () => frame.contentWindow?.postMessage({source:'gotune-host',command:'theme',colors},'*');
+    const sendFrameState = () => {
+      frame.contentWindow?.postMessage({source:'gotune-host',command:'theme',colors},'*');
+      frame.contentWindow?.postMessage({
+        source:'gotune-host',
+        command:'flame-options',
+        singleClickOpensSource:flameSingleClick.checked
+      },'*');
+    };
     const focus = name => {
       if(!name)return;
       frame.contentWindow?.postMessage({source:'gotune-host',command:'focus-function',functionName:name},'*');
@@ -602,6 +616,7 @@ function viewerHtml(
       document.getElementById('flameTools').hidden=view!=='flame';
       configure.hidden=view!=='graph';
       treeTools.hidden=view!=='tree';
+      flameSettings.hidden=view!=='flame';
       graphSearchResults=[];graphSearchIndex=-1;flameSearchIndex=-1;flameSearchTotal=0;
       renderGraphSearchResults();
       if(view==='tree'){revealTreeSelection();renderTree()}else{pendingFocus=Boolean(selectedFunction);frame.src=iframeUrl()}
@@ -682,7 +697,8 @@ function viewerHtml(
     document.getElementById('searchNext').addEventListener('click',()=>frame.contentWindow?.postMessage({source:'gotune-host',command:'search-step',delta:1},'*'));
     treePercentMode.addEventListener('change',()=>{saveState();renderTree()});
     treeSingleClick.addEventListener('change',saveState);
-    frame.addEventListener('load',sendTheme);
+    flameSingleClick.addEventListener('change',()=>{saveState();sendFrameState()});
+    frame.addEventListener('load',sendFrameState);
     window.addEventListener('message',event=>{
       const message=event.data;
       if(message?.source==='gotune-pprof'){
@@ -703,7 +719,7 @@ function viewerHtml(
           flameSearchTotal=Number(message.total);
           updateSearchControls();
         }
-        else if(message.command==='ready'){sendTheme();if(pendingFocus&&selectedFunction){pendingFocus=false;focus(selectedFunction)}else searchProfile(search.value)}
+        else if(message.command==='ready'){sendFrameState();if(pendingFocus&&selectedFunction){pendingFocus=false;focus(selectedFunction)}else searchProfile(search.value)}
         else if(message.command==='focus-missed'&&currentView==='graph'){
           if(!graphLocateExpanded){
             graphLocateExpanded=true;

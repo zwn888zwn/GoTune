@@ -139,7 +139,7 @@ class HotspotCodeLensProvider implements vscode.CodeLensProvider {
       );
       if (!hasEvidence) return [];
       return [new vscode.CodeLens(document.lineAt(fn.startLine - 1).range, {
-        command: 'gotune.analyzeCurrentFunction',
+        command: 'gotune.showCurrentFunctionInProfile',
         title: functionEvidenceSummary(report),
         arguments: [fn]
       })];
@@ -204,26 +204,17 @@ class FunctionEvidenceCodeActionProvider implements vscode.CodeActionProvider {
       configuredSourcePathMappings(),
       activeInvestigationFindings()
     );
-    const inspect = new vscode.CodeAction('GoTune: 采集并分析当前函数', vscode.CodeActionKind.QuickFix);
-    inspect.command = {
-      command: 'gotune.analyzeCurrentFunction',
-      title: inspect.title,
+    if (report.items.length === 0 && report.findings.length === 0) return [];
+    const locate = new vscode.CodeAction(
+      'GoTune: 在当前 pprof 中定位',
+      vscode.CodeActionKind.QuickFix
+    );
+    locate.command = {
+      command: 'gotune.showCurrentFunctionInProfile',
+      title: locate.title,
       arguments: [fn]
     };
-    const actions = [inspect];
-    if (report.items.length > 0 || report.findings.length > 0) {
-      const locate = new vscode.CodeAction(
-        'GoTune: 在当前 pprof 中定位',
-        vscode.CodeActionKind.QuickFix
-      );
-      locate.command = {
-        command: 'gotune.showCurrentFunctionInProfile',
-        title: locate.title,
-        arguments: [fn]
-      };
-      actions.push(locate);
-    }
-    return actions;
+    return [locate];
   }
 }
 
@@ -471,28 +462,6 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showErrorMessage(`GoTune: ${errorMessage(error)}`);
       }
     }),
-    vscode.commands.registerCommand(
-      'gotune.analyzeCurrentFunction',
-      async (requested?: GoFunctionReference) => {
-        const fn = isGoFunctionReference(requested) ? requested : await functionAtEditor();
-        if (!fn) {
-          void vscode.window.showInformationMessage('GoTune: Put the cursor inside a Go function first.');
-          return;
-        }
-        const report = collectFunctionEvidence(
-          fn,
-          currentFunctionEvidenceSessions(),
-          activeBaselineSessionIds(),
-          configuredSourcePathMappings(),
-          activeInvestigationFindings()
-        );
-        if (report.items.length > 0 || report.findings.length > 0) {
-          await vscode.commands.executeCommand('gotune.showCurrentFunctionInProfile');
-          return;
-        }
-        await captureCurrentFunctionOverview(fn);
-      }
-    ),
     vscode.commands.registerCommand('gotune.findBottlenecks', async () => {
       const selected = await vscode.window.showQuickPick([
         {
@@ -958,13 +927,15 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       void showSessionProfile(activeSession);
     }),
-    vscode.commands.registerCommand('gotune.showCurrentFunctionInProfile', async (item?: HotspotItem) => {
+    vscode.commands.registerCommand('gotune.showCurrentFunctionInProfile', async (
+      item?: HotspotItem | GoFunctionReference
+    ) => {
       const directHotspot = item instanceof HotspotItem ? item.hotspot : undefined;
       if (directHotspot && activeSession) {
         void showSessionProfile(activeSession, directHotspot);
         return;
       }
-      const fn = await functionAtEditor();
+      const fn = isGoFunctionReference(item) ? item : await functionAtEditor();
       if (!fn) {
         void vscode.window.showInformationMessage('GoTune：请先把光标放在 Go 函数内。');
         return;
@@ -3280,37 +3251,6 @@ export function activate(context: vscode.ExtensionContext): void {
     });
     if (suffixes.length !== 1) return undefined;
     return suffixes[0].location;
-  }
-
-  async function captureCurrentFunctionOverview(fn: GoFunctionReference): Promise<void> {
-    if (!await ensureTargetRunningForCapture()) return;
-    const investigation = ensureCodeCaptureInvestigation(activeTargetIdentity());
-    const seconds = vscode.workspace.getConfiguration('gotune').get<number>('captureCpuSeconds', 10);
-    void vscode.window.showInformationMessage(
-      `GoTune：请在接下来的 ${seconds} 秒内触发会调用 ${fn.name} 的操作。`
-    );
-    await captureManagedProfile(
-      `profile?seconds=${seconds}`,
-      '当前函数 CPU',
-      undefined,
-      seconds * 1000 + 15_000,
-      false,
-      investigation.id
-    );
-    const report = collectFunctionEvidence(
-      fn,
-      currentFunctionEvidenceSessions(),
-      activeBaselineSessionIds(),
-      configuredSourcePathMappings(),
-      activeInvestigationFindings()
-    );
-    if (report.items.length === 0 && report.findings.length === 0) {
-      void vscode.window.showWarningMessage(
-        `GoTune：采集期间没有观察到 ${fn.name}，请确认实际操作会调用这个函数。`
-      );
-      return;
-    }
-    await vscode.commands.executeCommand('gotune.showCurrentFunctionInProfile');
   }
 
   async function openSourceAndInspect(file: string, line: number): Promise<void> {

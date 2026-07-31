@@ -89,11 +89,6 @@
         "icon": "$(run)"
       },
       {
-        "command": "gotune.analyzeCurrentFunction",
-        "title": "GoTune: 采集并分析当前函数",
-        "icon": "$(symbol-method)"
-      },
-      {
         "command": "gotune.stopProfilerTarget",
         "title": "GoTune: 停止分析目标",
         "icon": "$(debug-stop)"
@@ -161,11 +156,6 @@
         }
       ],
       "editor/context": [
-        {
-          "command": "gotune.analyzeCurrentFunction",
-          "when": "editorLangId == go",
-          "group": "navigation@90"
-        },
         {
           "command": "gotune.showCurrentFunctionInProfile",
           "when": "editorLangId == go && gotune.hasActiveProfile",

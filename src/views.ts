@@ -32,7 +32,6 @@ export function runningItems(
 ): vscode.TreeItem[] {
   if (snapshot.status === 'idle') {
     return [
-      new RunningItem('分析当前函数', '在 pprof 中定位并查看调用关系', 'symbol-method', 'gotune.analyzeCurrentFunction'),
       new RunningItem('启动当前 Go main', '自动注入 pprof 并运行当前 main 包', 'run', 'gotune.runWithProfiler'),
       new RunningItem('连接 pprof 服务', '分析已经运行的 Go 进程', 'plug', 'gotune.fetchProfile'),
       new RunningItem('导入 pprof 文件', '打开已有 CPU 或 Heap Profile', 'folder-opened', 'gotune.importProfile')
@@ -49,7 +48,6 @@ export function runningItems(
   }
   return [
     new RunningItem(snapshot.target?.importPath ?? 'Go 目标', `运行中 · PID ${snapshot.pid ?? '—'}`, 'vm-running'),
-    new RunningItem('分析当前函数', '在 pprof 中定位并查看调用关系', 'symbol-method', 'gotune.analyzeCurrentFunction'),
     new RunningItem(
       cpuRecordingStartedAt ? '停止 CPU 录制' : '开始 CPU 录制',
       cpuRecordingStartedAt
