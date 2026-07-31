@@ -2,7 +2,11 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { GoroutineTracker, parseGoroutineDump } = require('../out/goroutine');
+const {
+  assessGoroutineSnapshot,
+  GoroutineTracker,
+  parseGoroutineDump
+} = require('../out/goroutine');
 
 const dump = `goroutine 1 [chan receive]:
 main.worker()
@@ -44,6 +48,8 @@ test('groups stacks, removes profiler noise, and detects stable blocking', () =>
   assert.equal(blocked.severity, 'suspicious');
   assert.equal(second.suspiciousCount, 2);
   assert.equal(second.totalDelta, 0);
+  assert.equal(second.totalGrowth, 0);
+  assert.equal(assessGoroutineSnapshot(second).kind, 'possible-stall');
 });
 
 test('reports goroutine count growth for a stable stack', () => {
@@ -56,5 +62,18 @@ test('reports goroutine count growth for a stable stack', () => {
   const blocked = grown.groups.find((group) => group.state === 'chan receive');
   assert.equal(blocked.count, 3);
   assert.equal(blocked.countDelta, 1);
+  assert.equal(blocked.countGrowth, 1);
   assert.equal(grown.totalDelta, 1);
+  assert.equal(grown.totalGrowth, 1);
+  assert.equal(assessGoroutineSnapshot(grown).kind, 'growth');
+});
+
+test('classifies stable I/O waits as normal rather than a deadlock', () => {
+  const tracker = new GoroutineTracker();
+  const ioOnly = dump.replaceAll('chan receive', 'IO wait');
+  tracker.capture(ioOnly);
+  const snapshot = tracker.capture(ioOnly);
+
+  assert.equal(snapshot.suspiciousCount, 0);
+  assert.equal(assessGoroutineSnapshot(snapshot).kind, 'normal-io');
 });

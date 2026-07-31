@@ -10,7 +10,8 @@ const {
   findingsFromComparison,
   findingsFromGoroutines,
   findingsFromMemoryTrend,
-  problemForSampleType
+  problemForSampleType,
+  rankFindings
 } = require('../out/investigation');
 
 function session(sampleType = 'cpu') {
@@ -59,6 +60,7 @@ test('maps profile metrics to evidence and problem kinds', () => {
   assert.equal(evidenceKind('alloc_space'), 'allocation');
   assert.equal(evidenceKind('inuse_space'), 'live-memory');
   assert.equal(evidenceKind('delay'), 'blocking');
+  assert.equal(evidenceKind('goroutine'), 'goroutine');
   assert.equal(problemForSampleType('cpu'), 'cpu');
   assert.equal(problemForSampleType('alloc_objects'), 'allocations');
 });
@@ -111,6 +113,35 @@ test('creates a suspicious source finding from stable blocked goroutines', () =>
   assert.equal(updated.findings.length, 1);
 });
 
+test('maps goroutine findings to a workspace frame instead of runtime internals', () => {
+  const findings = findingsFromGoroutines('investigation', {
+    capturedAt: 1,
+    total: 2,
+    stateCount: 1,
+    suspiciousCount: 2,
+    totalDelta: 0,
+    totalGrowth: 0,
+    groups: [{
+      signature: 'blocked',
+      state: 'chan send',
+      count: 2,
+      countDelta: 0,
+      countGrowth: 0,
+      topFunction: 'runtime.chansend',
+      frames: [
+        { functionName: 'runtime.chansend', file: '/go/src/runtime/chan.go', line: 20 },
+        { functionName: 'main.Submit', file: '/workspace/queue.go', line: 42 }
+      ],
+      representative: 'stack',
+      stableCaptures: 3,
+      severity: 'suspicious',
+      explanation: 'stable'
+    }]
+  }, 2, (file) => file.startsWith('/workspace/'));
+
+  assert.deepEqual(findings[0].location, { file: '/workspace/queue.go', line: 42 });
+});
+
 test('turns before-after profile changes into verification findings', () => {
   const findings = findingsFromComparison('investigation', {
     baseline: session('cpu'),
@@ -131,4 +162,26 @@ test('turns before-after profile changes into verification findings', () => {
 
   assert.equal(findings[0].severity, 'verified');
   assert.match(findings[0].title, /Improved/);
+});
+
+test('ranks the optimization target and actionable source findings first', () => {
+  const base = {
+    investigationId: 'investigation',
+    kind: 'cpu',
+    detail: 'detail',
+    createdAt: 1
+  };
+  const ranked = rankFindings([
+    { ...base, id: 'info', severity: 'info', title: 'Info' },
+    {
+      ...base,
+      id: 'watch',
+      severity: 'watch',
+      title: 'Watch',
+      location: { file: '/workspace/main.go', line: 10 }
+    },
+    { ...base, id: 'target', severity: 'info', title: 'Target' }
+  ], 'target');
+
+  assert.deepEqual(ranked.map((finding) => finding.id), ['target', 'watch', 'info']);
 });

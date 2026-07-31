@@ -21,3 +21,8 @@ test('matches a remote profile source with its local workspace file', () => {
     { '/container/src/project': '/Users/me/project' }
   ), true);
 });
+
+test('does not crash when an editor command provides an invalid source reference', () => {
+  assert.equal(sourcePathsMatch(undefined, '/workspace/main.go'), false);
+  assert.equal(sourcePathsMatch('/workspace/main.go', undefined), false);
+});

@@ -1,11 +1,13 @@
 # GoTune
 
-GoTune is a source-centered Go performance debugger for VS Code. It turns
-pprof and runtime trace evidence into findings beside the code, then reruns
-the same workload to verify whether a change helped.
+GoTune is a source-centered Go performance debugger for VS Code. Start from
+the function under the cursor, search globally for a bottleneck, or describe
+a known problem. GoTune turns pprof and runtime trace evidence into findings
+beside the code, then reruns the same workload to verify whether a change
+helped.
 
 ```text
-Inspect current function or choose a symptom
+Analyze current function, find global bottlenecks, or choose a known problem
 → GoTune collects matching runtime evidence
 → findings open the exact source and next action
 → edit the code
@@ -13,36 +15,53 @@ Inspect current function or choose a symptom
 → compare runtime and business outcomes
 ```
 
-Raw Top, Flame Graph, Call Tree, Source, and `go tool trace` views remain
-available as advanced evidence. They are not the required starting point.
+The default sidebar contains only Analyze and Findings. Raw profiles, manual
+captures, saved scenarios, Top, Flame Graph, Call Tree, Source, and
+`go tool trace` remain available under **Show advanced evidence**.
 
 ## Start from code
 
-Put the cursor in a Go function and run **GoTune: Inspect Current Function**.
+Put the cursor in a Go function and run **GoTune: Analyze Current Function
+Performance**. When the function has no evidence yet, GoTune starts the
+current `package main` when possible, captures CPU and allocations while the
+operation is reproduced, then takes a post-GC live-memory snapshot.
 The function panel, CodeLens, Hover, gutter marker, and line annotations
 combine all evidence in the active Investigation:
 
 - CPU self and cumulative cost
-- cumulative allocations
-- live memory attributed to the allocation path
+- timed allocation bytes and object counts
+- live bytes and object counts attributed to the allocation path
 - block, mutex, network, syscall, and scheduler waiting
+- Goroutine growth and stable blocking Findings
 - primary caller and expensive callees
 - matching scenario baseline delta
 
 If evidence is missing, the editor Quick Fix captures it without requiring
 you to choose a pprof endpoint first. Allocation findings can launch focused
-compiler escape analysis.
+compiler escape analysis. The same panel can mark the function as the current
+optimization target and repeat a compatible evidence protocol after the edit.
+
+## Find a global bottleneck
+
+Open **Go Performance → Analyze → Find global bottlenecks**, then rank the
+kind of cost that matters: CPU, live memory, allocations, Goroutine/blocking,
+or an operation timeline. CPU, memory, allocation, mutex, and block evidence
+opens as a Graphviz call graph when `dot` is available.
+
+Graph nodes show self and inclusive cost. Clicking a node opens its local Go
+source and combined function evidence. The precise Top, Source, Flame Graph,
+and raw Call Tree remain available beside the graph.
 
 ## Start from a problem
 
-Open **Go Performance → Start / Running → Investigate a performance
-problem**, then choose the symptom:
+Open **Go Performance → Analyze → Investigate a known performance problem**,
+then choose the symptom:
 
-- CPU high or operation slow
+- CPU usage is high
 - Memory keeps growing
 - Too many allocations or GC pressure
 - Request stuck or possible deadlock
-- Latency high but CPU unclear
+- Operation or request is slow
 
 GoTune starts the current `package main` when possible and automatically
 combines the relevant evidence. For example, memory growth uses a post-GC
@@ -52,7 +71,9 @@ Mutex and Block profiles when contention sampling is enabled.
 
 Findings deliberately say “suspicious” or “possible” where pprof cannot prove
 a deadlock or object owner. Normal stable I/O waits are not reported as
-errors.
+errors. From a blocking Finding, **Find related channel or lock code** uses
+the Go language server's real symbol references to list senders, receivers,
+lock/unlock sites, and wait/signal sites.
 
 ## Start and stop a target
 
@@ -86,7 +107,11 @@ A Performance Scenario stores:
 The first run establishes the baseline. Later runs reuse the same conditions
 and produce improvement/regression Findings. Baseline Profile sessions are
 preserved across VS Code restarts instead of being evicted with ordinary
-history.
+history. Every run automatically records comparable runtime outcomes such as
+sampled CPU, allocated bytes and objects, post-GC live-heap/object growth,
+Mutex/Block delay, and Goroutine growth alongside business metrics. A scenario
+that requests contention evidence also starts its target with contention
+sampling enabled for that run.
 
 Business metrics can come from:
 
@@ -104,8 +129,11 @@ Profiles to the same source investigation.
 
 **Trace execution time** keeps the complete `go tool trace` timeline as
 advanced evidence. It also automatically derives network, synchronization,
-syscall, and scheduler-wait pprof profiles and maps those wall-clock wait
-paths back to functions and source lines.
+syscall, and scheduler-delay pprof profiles and maps their dominant paths back
+to functions and source lines. The first result is a source-oriented timing
+summary. It explicitly reports aggregate delay across Goroutines—not a fake
+single-request wall-clock breakdown—and offers the raw timeline when exact
+ordering or application regions matter.
 
 ## Struct layout
 

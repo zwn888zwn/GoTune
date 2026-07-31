@@ -94,3 +94,26 @@ test('falls back to the Go symbol name when source paths are unavailable', () =>
 
   assert.equal(findFunctionHotspot(fn, profile).name, 'main.work');
 });
+
+test('combines source findings such as goroutine growth with profile evidence', () => {
+  const report = collectFunctionEvidence(
+    fn,
+    [session('cpu', 'cpu', 10, 20)],
+    undefined,
+    {},
+    [{
+      id: 'goroutine-growth',
+      investigationId: 'investigation',
+      kind: 'goroutine',
+      severity: 'suspicious',
+      title: '12 goroutines stay in chan send',
+      detail: 'The same stack remained for three captures.',
+      functionName: 'main.work',
+      location: { file: '/workspace/main.go', line: 12 },
+      createdAt: 2
+    }]
+  );
+
+  assert.deepEqual(report.availableKinds, ['cpu', 'goroutine']);
+  assert.equal(report.findings[0].id, 'goroutine-growth');
+});

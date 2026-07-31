@@ -41,3 +41,19 @@ test('separates persistent memory growth from fluctuating allocations', () => {
     false
   );
 });
+
+test('tracks live object counts from the same post-GC protocol', () => {
+  const snapshots = [
+    heap('baseline', 10, { 'app.leak': 4 }),
+    heap('round1', 15, { 'app.leak': 9 }),
+    heap('round2', 21, { 'app.leak': 15 })
+  ].map((snapshot) => ({
+    ...snapshot,
+    sampleType: 'inuse_objects',
+    sampleUnit: 'count'
+  }));
+  const trend = analyzeMemoryTrend(snapshots);
+
+  assert.equal(trend.totalGrowth, 11);
+  assert.equal(trend.entries[0].growth, 11);
+});

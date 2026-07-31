@@ -102,6 +102,8 @@ export interface PerformanceScenario {
   problem: ProblemKind;
   workloadKind: WorkloadKind;
   workload?: string;
+  workloadTaskSource?: string;
+  workloadTaskDefinition?: string;
   warmupSeconds: number;
   captureSeconds: number;
   captureKinds: EvidenceKind[];

@@ -21,8 +21,15 @@ export function analyzeMemoryTrend(sessions: ProfileSession[]): MemoryTrend {
   if (sessions.length < 3) {
     throw new Error('Memory growth analysis requires at least three heap snapshots');
   }
-  if (sessions.some((session) => session.sampleType !== 'inuse_space' || session.sampleUnit !== 'bytes')) {
-    throw new Error('Memory growth analysis requires inuse_space heap snapshots');
+  const sampleType = sessions[0].sampleType;
+  const sampleUnit = sessions[0].sampleUnit;
+  if (
+    !/^inuse_(?:space|objects)$/.test(sampleType)
+    || sessions.some((session) =>
+      session.sampleType !== sampleType || session.sampleUnit !== sampleUnit
+    )
+  ) {
+    throw new Error('Memory growth analysis requires matching inuse_space or inuse_objects heap snapshots');
   }
 
   const keys = new Set<string>();

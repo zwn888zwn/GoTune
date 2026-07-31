@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { runGoBenchmark } from './benchmark';
 import { BenchmarkSnapshot, showBenchmarkPanel } from './benchmarkView';
+import { isRuntimeLine } from './classify';
 import { compareProfiles } from './compare';
 import { analyzeEscapes, resolveSourceFile } from './escape';
 import {
@@ -24,7 +25,8 @@ import {
   findingsFromComparison,
   findingsFromGoroutines,
   findingsFromMemoryTrend,
-  problemForSampleType
+  problemForSampleType,
+  rankFindings
 } from './investigation';
 import { analyzeMemoryTrend } from './memoryTrend';
 import {
@@ -38,9 +40,11 @@ import {
   ProblemKind,
   ProfileSession,
   RuntimeMetrics,
-  ScenarioRunRecord
+  ScenarioRunRecord,
+  SourceLocation
 } from './model';
 import { listProfileSampleTypes, parseProfile } from './profileParser';
+import { PprofViewer } from './pprofViewer';
 import { buildProfileUrl } from './profileUrl';
 import { discoverMainPackages, MainPackage, ProfilerRunner, resolveMainPackage } from './runner';
 import { inspectStructLayout } from './structLayout';
@@ -50,10 +54,17 @@ import {
   MetricsAdapter,
   parseMetricPatternSpec
 } from './scenarioMetrics';
+import {
+  profileRuntimeMetrics,
+  runtimeMetricsBetween
+} from './scenarioRuntimeMetrics';
 import { showScenarioResultPanel } from './scenarioResultView';
-import { sourcePathsMatch } from './sourcePath';
+import { applySourcePathMappings, sourcePathsMatch } from './sourcePath';
+import { describeSyncUsage, syncSymbolAtLine } from './syncReferences';
 import { TraceViewer } from './traceViewer';
 import { deriveTraceProfiles, TraceProfileKind } from './traceProfiles';
+import { createTraceSummary } from './traceSummary';
+import { showTraceSummaryPanel } from './traceSummaryView';
 import {
   HotspotItem,
   InvestigationFindingItem,
@@ -68,7 +79,6 @@ import {
   showComparisonPanel,
   showGoroutineInspector,
   showMemoryTrendPanel,
-  showProfilePanel,
   showRuntimeOverviewPanel
 } from './webview';
 
@@ -79,11 +89,11 @@ let activeSession: ProfileSession | undefined;
 let baselineSessionId: string | undefined;
 let activeInvestigationId: string | undefined;
 const memoryGrowthSessions: ProfileSession[] = [];
+const memoryGrowthObjectSessions: ProfileSession[] = [];
 
 const sessionsStorageKey = 'gotune.sessions.v1';
 const activeSessionStorageKey = 'gotune.activeSession.v1';
 const baselineStorageKey = 'gotune.baselineSession.v1';
-const advancedToolsStorageKey = 'gotune.advancedToolsVisible.v1';
 const investigationsStorageKey = 'gotune.investigations.v1';
 const activeInvestigationStorageKey = 'gotune.activeInvestigation.v1';
 const scenariosStorageKey = 'gotune.scenarios.v1';
@@ -95,12 +105,9 @@ interface RemoteProfileTarget {
 }
 
 const remoteProfileTargets: RemoteProfileTarget[] = [
-  { label: 'CPU', description: '10 second CPU profile', endpoint: 'profile?seconds=10' },
-  { label: 'Heap / Allocations', description: 'Choose in-use or allocation metric after download', endpoint: 'heap' },
-  { label: 'Goroutines', description: 'Current goroutine stacks', endpoint: 'goroutine' },
-  { label: 'Mutex', description: 'Mutex contention profile', endpoint: 'mutex' },
-  { label: 'Block', description: 'Blocking profile', endpoint: 'block' },
-  { label: 'Direct profile URL', description: 'Use a concrete profile endpoint without modification', endpoint: '' }
+  { label: 'CPU', description: '采集 10 秒 CPU Profile', endpoint: 'profile?seconds=10' },
+  { label: '内存', description: '下载后选择存活内存或累计分配指标', endpoint: 'heap' },
+  { label: '直接 Profile 地址', description: '不修改输入的完整 pprof 地址', endpoint: '' }
 ];
 
 class HotspotCodeLensProvider implements vscode.CodeLensProvider {
@@ -116,53 +123,23 @@ class HotspotCodeLensProvider implements vscode.CodeLensProvider {
     return functions.flatMap((fn) => {
       const report = collectFunctionEvidence(
         fn,
-        sessions,
+        currentFunctionEvidenceSessions(),
         activeBaselineSessionIds(),
-        configuredSourcePathMappings()
+        configuredSourcePathMappings(),
+        activeInvestigationFindings()
       );
-      if (report.items.length === 0) return [];
+      const hasEvidence = report.items.some((item) =>
+        item.selfPercent >= 1 || item.cumulativePercent >= 3
+      ) || report.findings.some((finding) =>
+        finding.severity === 'suspicious' || finding.severity === 'verified'
+      );
+      if (!hasEvidence) return [];
       return [new vscode.CodeLens(document.lineAt(fn.startLine - 1).range, {
-        command: 'gotune.inspectCurrentFunction',
-        title: functionEvidenceSummary(report.items),
+        command: 'gotune.analyzeCurrentFunction',
+        title: functionEvidenceSummary(report),
         arguments: [fn]
       })];
     });
-  }
-}
-
-class FunctionEvidenceHoverProvider implements vscode.HoverProvider {
-  async provideHover(
-    document: vscode.TextDocument,
-    position: vscode.Position
-  ): Promise<vscode.Hover | undefined> {
-    const fn = await functionAtDocumentPosition(document, position);
-    if (!fn) return undefined;
-    const report = collectFunctionEvidence(
-      fn,
-      sessions,
-      activeBaselineSessionIds(),
-      configuredSourcePathMappings()
-    );
-    if (report.items.length === 0) return undefined;
-    const markdown = new vscode.MarkdownString(undefined, true);
-    markdown.isTrusted = { enabledCommands: ['gotune.inspectCurrentFunction'] };
-    markdown.appendMarkdown(`### GoTune · \`${fn.name}\`\n\n`);
-    for (const item of latestFunctionEvidence(report.items)) {
-      markdown.appendMarkdown(
-        `- **${functionEvidenceKindLabel(item.kind)}**: `
-        + `${formatValue(item.self, item.sampleUnit)} self (${item.selfPercent.toFixed(1)}%), `
-        + `${formatValue(item.cumulative, item.sampleUnit)} with callees (${item.cumulativePercent.toFixed(1)}%)`
-        + functionEvidenceDeltaText(item.baselineDeltaPercent)
-        + '\n'
-      );
-    }
-    markdown.appendMarkdown(
-      `\n[Open combined evidence](command:gotune.inspectCurrentFunction?${encodeURIComponent(JSON.stringify([fn]))})`
-    );
-    markdown.appendMarkdown(
-      '\n\n_Self is spent in this function. With callees includes work below it in the sampled call path._'
-    );
-    return new vscode.Hover(markdown);
   }
 }
 
@@ -172,51 +149,32 @@ class FunctionEvidenceCodeActionProvider implements vscode.CodeActionProvider {
     range: vscode.Range
   ): Promise<vscode.CodeAction[]> {
     const fn = await functionAtDocumentPosition(document, range.start);
-    if (!fn) {
-      const struct = await structAtDocumentPosition(document, range.start);
-      if (!struct) return [];
-      const layout = new vscode.CodeAction('GoTune: Inspect struct memory layout', vscode.CodeActionKind.QuickFix);
-      layout.command = {
-        command: 'gotune.inspectStructLayout',
-        title: layout.title,
-        arguments: [struct]
-      };
-      return [layout];
-    }
+    if (!fn) return [];
     const report = collectFunctionEvidence(
       fn,
-      sessions,
+      currentFunctionEvidenceSessions(),
       activeBaselineSessionIds(),
-      configuredSourcePathMappings()
+      configuredSourcePathMappings(),
+      activeInvestigationFindings()
     );
-    const actions: vscode.CodeAction[] = [];
-    const inspect = new vscode.CodeAction('GoTune: Inspect combined function evidence', vscode.CodeActionKind.QuickFix);
+    const inspect = new vscode.CodeAction('GoTune: 分析当前函数性能', vscode.CodeActionKind.QuickFix);
     inspect.command = {
-      command: 'gotune.inspectCurrentFunction',
+      command: 'gotune.analyzeCurrentFunction',
       title: inspect.title,
       arguments: [fn]
     };
-    actions.push(inspect);
-    for (const kind of (['cpu', 'allocation', 'live-memory'] as EvidenceKind[])) {
-      if (report.availableKinds.includes(kind)) continue;
-      const capture = new vscode.CodeAction(
-        `GoTune: Capture missing ${functionEvidenceKindLabel(kind)} evidence`,
+    const actions = [inspect];
+    if (report.items.length > 0 || report.findings.length > 0) {
+      const locate = new vscode.CodeAction(
+        'GoTune: 在当前 pprof 中定位',
         vscode.CodeActionKind.QuickFix
       );
-      capture.command = {
-        command: 'gotune.captureFunctionEvidence',
-        title: capture.title,
-        arguments: [kind]
+      locate.command = {
+        command: 'gotune.showCurrentFunctionInProfile',
+        title: locate.title,
+        arguments: [fn]
       };
-      actions.push(capture);
-    }
-    if (report.availableKinds.includes('allocation')) {
-      const escapes = new vscode.CodeAction('GoTune: Analyze escapes in this function', vscode.CodeActionKind.QuickFix);
-      escapes.command = {
-        command: 'gotune.analyzeEscape',
-        title: escapes.title
-      };
-      actions.push(escapes);
+      actions.push(locate);
     }
     return actions;
   }
@@ -263,17 +221,15 @@ export function activate(context: vscode.ExtensionContext): void {
   const targetOutput = vscode.window.createOutputChannel('GoTune Target');
   const runner = new ProfilerRunner(targetOutput);
   const traceViewer = new TraceViewer(targetOutput);
-  let advancedToolsVisible = context.workspaceState.get<boolean>(advancedToolsStorageKey, false);
+  const pprofViewer = new PprofViewer(targetOutput);
   let runtimeOverviewPanel: vscode.WebviewPanel | undefined;
   let runtimeOverviewTimer: NodeJS.Timeout | undefined;
   let runtimeOverviewPolling = false;
   const goroutineTracker = new GoroutineTracker();
   const codeLensProvider = new HotspotCodeLensProvider();
-  const runningProvider = new PerformanceTreeProvider(() => runningItems(
-    runner.snapshot,
-    memoryGrowthSessions.length,
-    advancedToolsVisible
-  ));
+  const runningProvider = new PerformanceTreeProvider<vscode.TreeItem>(() =>
+    runningItems(runner.snapshot, activeSession, baselineSessionId, isWorkspaceSourcePath)
+  );
   const sessionProvider = new PerformanceTreeProvider(() => sessions.map((session) => {
     const state = session.id === baselineSessionId
       ? 'baseline'
@@ -289,19 +245,17 @@ export function activate(context: vscode.ExtensionContext): void {
   const findingsProvider = new PerformanceTreeProvider(() => {
     const investigation = currentInvestigation();
     if (!investigation) return [];
-    return investigation.findings.map((finding) => new InvestigationFindingItem(
+    return rankFindings(
+      investigation.findings,
+      investigation.targetFindingId
+    ).map((finding) => new InvestigationFindingItem(
       finding,
       sessions.find((session) => session.id === finding.captureId)
     ));
   });
   const heatDecoration = vscode.window.createTextEditorDecorationType({
-    isWholeLine: true,
-    backgroundColor: new vscode.ThemeColor('editor.wordHighlightBackground'),
     gutterIconPath: context.asAbsolutePath('resources/evidence.svg'),
     gutterIconSize: 'contain',
-    borderColor: new vscode.ThemeColor('charts.orange'),
-    borderStyle: 'solid',
-    borderWidth: '0 0 0 2px',
     overviewRulerColor: new vscode.ThemeColor('charts.orange'),
     overviewRulerLane: vscode.OverviewRulerLane.Right
   });
@@ -315,6 +269,7 @@ export function activate(context: vscode.ExtensionContext): void {
     targetOutput,
     runner,
     traceViewer,
+    pprofViewer,
     { dispose: closeRuntimeOverview },
     heatDecoration,
     heatLabelDecoration,
@@ -344,6 +299,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       if (editor?.document.languageId === 'go') {
         applyProfileHeatToEditor(editor, heatDecoration, heatLabelDecoration);
+        codeLensProvider.refresh();
       }
     }),
     vscode.window.registerTreeDataProvider('gotune.running', runningProvider),
@@ -351,6 +307,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.registerTreeDataProvider('gotune.scenarios', scenarioProvider),
     vscode.window.registerTreeDataProvider('gotune.sessions', sessionProvider),
     vscode.window.registerTreeDataProvider('gotune.findings', findingsProvider),
+    vscode.window.registerWebviewViewProvider(
+      'gotune.profileView',
+      pprofViewer,
+      { webviewOptions: { retainContextWhenHidden: true } }
+    ),
     vscode.commands.registerCommand('gotune.importProfile', async () => {
       const selected = await vscode.window.showOpenDialog({
         canSelectMany: false,
@@ -368,7 +329,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand(
       'gotune.runWithProfiler',
-      async (request?: { skipCurrentEditor?: boolean; enableContentionProfiles?: boolean }) => {
+      async (request?: {
+        skipCurrentEditor?: boolean;
+        enableContentionProfiles?: boolean;
+        skipReadyPrompt?: boolean;
+      }) => {
       if (!vscode.workspace.isTrusted) {
         void vscode.window.showWarningMessage('GoTune: Trust this workspace before running a Go target.');
         return;
@@ -401,15 +366,17 @@ export function activate(context: vscode.ExtensionContext): void {
               ?? configuration.get<boolean>('enableContentionProfiles', false)
           })
         );
-        const action = await vscode.window.showInformationMessage(
-          `GoTune: ${snapshot.target?.importPath} is ready on a protected localhost port.`,
-          'Capture CPU',
-          'Show Output'
-        );
-        if (action === 'Capture CPU') {
-          void vscode.commands.executeCommand('gotune.captureCpu');
-        } else if (action === 'Show Output') {
-          targetOutput.show();
+        if (!request?.skipReadyPrompt) {
+          const action = await vscode.window.showInformationMessage(
+            `GoTune: ${snapshot.target?.importPath} is ready on a protected localhost port.`,
+            'Capture CPU',
+            'Show Output'
+          );
+          if (action === 'Capture CPU') {
+            void vscode.commands.executeCommand('gotune.captureCpu');
+          } else if (action === 'Show Output') {
+            targetOutput.show();
+          }
         }
       } catch (error) {
         await runner.stop();
@@ -434,6 +401,107 @@ export function activate(context: vscode.ExtensionContext): void {
         targetOutput.appendLine(`[GoTune] Guided investigation failed: ${errorMessage(error)}`);
         void vscode.window.showErrorMessage(`GoTune: ${errorMessage(error)}`);
       }
+    }),
+    vscode.commands.registerCommand(
+      'gotune.analyzeCurrentFunction',
+      async (requested?: GoFunctionReference) => {
+        const fn = isGoFunctionReference(requested) ? requested : await functionAtEditor();
+        if (!fn) {
+          void vscode.window.showInformationMessage('GoTune: Put the cursor inside a Go function first.');
+          return;
+        }
+        const report = collectFunctionEvidence(
+          fn,
+          currentFunctionEvidenceSessions(),
+          activeBaselineSessionIds(),
+          configuredSourcePathMappings(),
+          activeInvestigationFindings()
+        );
+        if (report.items.length > 0 || report.findings.length > 0) {
+          await vscode.commands.executeCommand('gotune.showCurrentFunctionInProfile');
+          return;
+        }
+        await captureCurrentFunctionOverview(fn);
+      }
+    ),
+    vscode.commands.registerCommand('gotune.findBottlenecks', async () => {
+      const selected = await vscode.window.showQuickPick([
+        {
+          label: '$(flame) CPU bottlenecks',
+          description: 'functions using the most CPU',
+          bottleneck: 'cpu' as const
+        },
+        {
+          label: '$(database) Live memory bottlenecks',
+          description: 'allocation paths producing the most memory still live after GC',
+          bottleneck: 'live-memory' as const
+        },
+        {
+          label: '$(symbol-array) Allocation bottlenecks',
+          description: 'functions allocating the most bytes and objects',
+          bottleneck: 'allocation' as const
+        },
+        {
+          label: '$(list-tree) Goroutine and blocking bottlenecks',
+          description: 'repeated stacks that are growing or making no progress',
+          bottleneck: 'blocking' as const
+        },
+        {
+          label: '$(history) Slow operation timeline',
+          description: 'scheduler, network, syscall, and synchronization delay',
+          bottleneck: 'latency' as const
+        }
+      ], {
+        title: 'Find Global Bottlenecks',
+        placeHolder: 'What kind of cost do you want to rank?'
+      });
+      if (!selected || !await ensureTargetRunningForCapture()) return;
+      if (selected.bottleneck === 'cpu') {
+        const seconds = vscode.workspace.getConfiguration('gotune').get<number>('captureCpuSeconds', 10);
+        void vscode.window.showInformationMessage(
+          `GoTune: Exercise the code now. CPU bottlenecks are being measured for ${seconds} seconds.`
+        );
+        const session = await captureManagedProfile(
+          `profile?seconds=${seconds}`,
+          'Global CPU bottlenecks',
+          undefined,
+          seconds * 1000 + 15_000,
+          false
+        );
+        if (session) void showSessionProfile(session);
+        return;
+      }
+      if (selected.bottleneck === 'live-memory') {
+        const captured = await captureManagedProfiles(
+          'heap?gc=1',
+          'Global live memory bottlenecks',
+          ['inuse_space', 'inuse_objects'],
+          undefined,
+          false
+        );
+        const session = captured.find((candidate) => candidate.sampleType === 'inuse_space');
+        if (session) void showSessionProfile(session);
+        return;
+      }
+      if (selected.bottleneck === 'allocation') {
+        const seconds = vscode.workspace.getConfiguration('gotune').get<number>('captureCpuSeconds', 10);
+        void vscode.window.showInformationMessage(
+          `GoTune: Exercise the code now. Allocations are being measured for ${seconds} seconds.`
+        );
+        const captured = await captureManagedProfiles(
+          `allocs?seconds=${seconds}`,
+          'Global allocation bottlenecks',
+          ['alloc_space', 'alloc_objects'],
+          seconds * 1000 + 15_000,
+          false
+        );
+        const session = captured.find((candidate) => candidate.sampleType === 'alloc_space');
+        if (session) void showSessionProfile(session);
+        return;
+      }
+      await vscode.commands.executeCommand(
+        selected.bottleneck === 'blocking' ? 'gotune.monitorGoroutines' : 'gotune.captureTrace'
+      );
     }),
     vscode.commands.registerCommand('gotune.runLaunchWithProfiler', async () => {
       if (!vscode.workspace.isTrusted) {
@@ -468,17 +536,17 @@ export function activate(context: vscode.ExtensionContext): void {
         `GoTune: Contention profiling ${!current ? 'enabled' : 'disabled'} in User Settings.${restart}`
       );
     }),
-    vscode.commands.registerCommand('gotune.toggleAdvancedTools', () => {
-      advancedToolsVisible = !advancedToolsVisible;
-      void context.workspaceState.update(advancedToolsStorageKey, advancedToolsVisible);
-      runningProvider.refresh();
-    }),
     vscode.commands.registerCommand('gotune.captureCpu', async () => {
       const seconds = vscode.workspace.getConfiguration('gotune').get<number>('captureCpuSeconds', 10);
       void vscode.window.showInformationMessage(
-        `GoTune: Reproduce the slow operation now. CPU is being measured for ${seconds} seconds.`
+        `GoTune：请在接下来的 ${seconds} 秒内触发需要分析的业务操作。`
       );
-      await captureManagedProfile(`profile?seconds=${seconds}`, 'CPU hotspots', undefined, seconds * 1000 + 15_000);
+      await captureManagedProfile(
+        `profile?seconds=${seconds}`,
+        'CPU 热点',
+        undefined,
+        seconds * 1000 + 15_000
+      );
     }),
     vscode.commands.registerCommand('gotune.showRuntimeOverview', async () => {
       const baseUrl = runner.snapshot.pprofUrl;
@@ -519,14 +587,33 @@ export function activate(context: vscode.ExtensionContext): void {
       runtimeOverviewTimer = setInterval(() => void refresh(), 1000);
     }),
     vscode.commands.registerCommand('gotune.captureHeap', async () => {
-      await captureManagedProfile('heap?gc=1', 'Live memory', 'inuse_space');
+      const captured = await captureManagedProfiles(
+        'heap?gc=1',
+        '当前存活内存',
+        ['inuse_space', 'inuse_objects'],
+        undefined,
+        false
+      );
+      const memory = captured.find((session) => session.sampleType === 'inuse_space');
+      if (!memory) return;
+      setActive(memory);
+      void showSessionProfile(memory);
     }),
     vscode.commands.registerCommand('gotune.checkMemoryGrowth', async () => {
       const sampleNumber = memoryGrowthSessions.length;
       const label = sampleNumber === 0 ? 'Memory baseline' : `Memory round ${sampleNumber}`;
-      const session = await captureManagedProfile('heap?gc=1', label, 'inuse_space', undefined, false);
-      if (!session) return;
+      const captured = await captureManagedProfiles(
+        'heap?gc=1',
+        label,
+        ['inuse_space', 'inuse_objects'],
+        undefined,
+        false
+      );
+      const session = captured.find((candidate) => candidate.sampleType === 'inuse_space');
+      const objects = captured.find((candidate) => candidate.sampleType === 'inuse_objects');
+      if (!session || !objects) return;
       memoryGrowthSessions.push(session);
+      memoryGrowthObjectSessions.push(objects);
       runningProvider.refresh();
       if (memoryGrowthSessions.length < 3) {
         void vscode.window.showInformationMessage(
@@ -537,15 +624,27 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       const trend = analyzeMemoryTrend(memoryGrowthSessions);
+      const objectTrend = analyzeMemoryTrend(memoryGrowthObjectSessions);
       const investigation = currentInvestigation();
       if (investigation) {
-        replaceInvestigation(addFindingsToInvestigation(
+        const withBytes = addFindingsToInvestigation(
           investigation,
           findingsFromMemoryTrend(investigation.id, trend),
           'memory-trend-'
+        );
+        replaceInvestigation(addFindingsToInvestigation(
+          withBytes,
+          findingsFromMemoryTrend(
+            investigation.id,
+            objectTrend,
+            Date.now(),
+            'memory-object-trend'
+          ),
+          'memory-object-trend-'
         ));
       }
       memoryGrowthSessions.splice(0);
+      memoryGrowthObjectSessions.splice(0);
       runningProvider.refresh();
       setActive(session);
       showMemoryTrendPanel(
@@ -586,6 +685,7 @@ export function activate(context: vscode.ExtensionContext): void {
           },
           () => deriveTraceProfiles(bytes, execution.goExecutable, execution.environment)
         );
+        const traceSessions: Array<{ kind: TraceProfileKind; session: ProfileSession }> = [];
         for (const profile of derived) {
           const session = parseProfile(
             profile.bytes,
@@ -598,11 +698,17 @@ export function activate(context: vscode.ExtensionContext): void {
           session.captureDurationMs = seconds * 1000;
           session.captureMode = 'delta';
           session.scenarioId = currentInvestigation()?.scenarioId;
+          pprofViewer.registerProfile(session.id, profile.bytes);
           addSession(session, false);
+          traceSessions.push({ kind: profile.kind, session });
         }
         const viewerUrl = await traceViewer.open(bytes, execution.goExecutable, execution.environment);
         const externalUrl = await vscode.env.asExternalUri(vscode.Uri.parse(viewerUrl));
-        await vscode.env.openExternal(externalUrl);
+        showTraceSummaryPanel(
+          createTraceSummary(seconds * 1000, traceSessions),
+          (file, line) => void openSource(file, line, heatDecoration, heatLabelDecoration),
+          () => void vscode.env.openExternal(externalUrl)
+        );
       } catch (error) {
         targetOutput.show(true);
         void vscode.window.showErrorMessage(
@@ -611,7 +717,16 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.commands.registerCommand('gotune.captureAllocations', async () => {
-      await captureManagedProfile('allocs', 'Allocations', 'alloc_space');
+      const seconds = vscode.workspace.getConfiguration('gotune').get<number>('captureCpuSeconds', 10);
+      void vscode.window.showInformationMessage(
+        `GoTune: Reproduce the allocation-heavy operation now. Bytes and object counts are measured for ${seconds} seconds.`
+      );
+      await captureManagedProfiles(
+        `allocs?seconds=${seconds}`,
+        'Allocation delta',
+        ['alloc_space', 'alloc_objects'],
+        seconds * 1000 + 15_000
+      );
     }),
     vscode.commands.registerCommand('gotune.captureGoroutines', async () => {
       await inspectGoroutines();
@@ -648,7 +763,12 @@ export function activate(context: vscode.ExtensionContext): void {
         if (!snapshot) return;
         replaceInvestigation(addFindingsToInvestigation(
           investigation,
-          findingsFromGoroutines(investigation.id, snapshot),
+          findingsFromGoroutines(
+            investigation.id,
+            snapshot,
+            Date.now(),
+            isWorkspaceSourcePath
+          ),
           'goroutine-'
         ));
         showGoroutineInspector(
@@ -716,24 +836,35 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showInformationMessage('GoTune: Import or fetch a profile first.');
         return;
       }
-      showSessionProfile(activeSession);
+      void showSessionProfile(activeSession);
     }),
     vscode.commands.registerCommand('gotune.showCurrentFunctionInProfile', async (item?: HotspotItem) => {
-      if (!activeSession) {
-        void vscode.window.showInformationMessage('GoTune: Capture or import a profile first.');
+      const directHotspot = item instanceof HotspotItem ? item.hotspot : undefined;
+      if (directHotspot && activeSession) {
+        void showSessionProfile(activeSession, directHotspot);
         return;
       }
-      const hotspot = item?.hotspot ?? await hotspotAtEditor();
-      if (!hotspot) {
-        void vscode.window.showInformationMessage(
-          'GoTune: The current function has no samples in the active profile.'
-        );
+      const fn = await functionAtEditor();
+      if (!fn) {
+        void vscode.window.showInformationMessage('GoTune：请先把光标放在 Go 函数内。');
         return;
       }
-      showSessionProfile(activeSession, hotspot);
+      const matches = currentFunctionEvidenceSessions().flatMap((session) => {
+        const hotspot = findFunctionHotspot(fn, session, configuredSourcePathMappings());
+        return hotspot ? [{ session, hotspot }] : [];
+      });
+      if (matches.length === 0) {
+        void vscode.window.showInformationMessage('GoTune：现有 pprof 证据中没有采样到当前函数。');
+        return;
+      }
+      const cpuMatch = matches.find(({ session }) => profileKind(session.sampleType) === 'cpu');
+      const activeMatch = matches.find(({ session }) => session.id === activeSession?.id);
+      const selected = cpuMatch ?? activeMatch ?? matches[0];
+      setActive(selected.session);
+      void showSessionProfile(selected.session, selected.hotspot);
     }),
     vscode.commands.registerCommand('gotune.inspectCurrentFunction', async (requested?: GoFunctionReference) => {
-      const fn = requested ?? await functionAtEditor();
+      const fn = isGoFunctionReference(requested) ? requested : await functionAtEditor();
       if (!fn) {
         void vscode.window.showInformationMessage('GoTune: Put the cursor inside a Go function first.');
         return;
@@ -741,9 +872,10 @@ export function activate(context: vscode.ExtensionContext): void {
       ensureInvestigation('code', activeTargetIdentity());
       const report = collectFunctionEvidence(
         fn,
-        sessions,
+        currentFunctionEvidenceSessions(),
         activeBaselineSessionIds(),
-        configuredSourcePathMappings()
+        configuredSourcePathMappings(),
+        activeInvestigationFindings()
       );
       showFunctionEvidencePanel(report, (action) => {
         if (action.command === 'open-source') {
@@ -760,10 +892,22 @@ export function activate(context: vscode.ExtensionContext): void {
           return;
         }
         if (action.command === 'capture') {
-          const command = action.kind === 'cpu'
-            ? 'gotune.captureCpu'
-            : action.kind === 'allocation' ? 'gotune.captureAllocations' : 'gotune.captureHeap';
-          void captureEvidenceForCurrentFunction(command);
+          void vscode.commands.executeCommand('gotune.captureFunctionEvidence', action.kind);
+          return;
+        }
+        if (action.command === 'track-function') {
+          void vscode.commands.executeCommand('gotune.trackCurrentFunction', fn);
+          return;
+        }
+        if (action.command === 'verify-function') {
+          void vscode.commands.executeCommand('gotune.verifyCurrentFunction', fn);
+          return;
+        }
+        if (action.command === 'open-finding') {
+          const finding = activeInvestigationFindings().find(
+            (candidate) => candidate.id === action.findingId
+          );
+          if (finding) void vscode.commands.executeCommand('gotune.nextFindingAction', finding);
           return;
         }
         const session = sessions.find((candidate) => candidate.id === action.sessionId);
@@ -776,20 +920,120 @@ export function activate(context: vscode.ExtensionContext): void {
             hotspot ? new HotspotItem(hotspot, session) : undefined
           );
         } else {
-          showSessionProfile(session, hotspot);
+          void showSessionProfile(session, hotspot);
         }
       });
     }),
+    vscode.commands.registerCommand(
+      'gotune.trackCurrentFunction',
+      async (requested?: GoFunctionReference) => {
+        const fn = isGoFunctionReference(requested) ? requested : await functionAtEditor();
+        if (!fn) {
+          void vscode.window.showInformationMessage('GoTune: Put the cursor inside a Go function first.');
+          return;
+        }
+        const investigation = ensureInvestigation('code', activeTargetIdentity());
+        const report = collectFunctionEvidence(
+          fn,
+          currentFunctionEvidenceSessions(),
+          activeBaselineSessionIds(),
+          configuredSourcePathMappings(),
+          investigation.findings
+        );
+        const existing = report.findings.find((finding) =>
+          finding.severity === 'suspicious' || finding.severity === 'watch'
+        ) ?? report.findings[0];
+        const target = existing ?? {
+          id: `target-function-${Date.now()}`,
+          investigationId: investigation.id,
+          kind: report.availableKinds[0] ?? 'cpu',
+          severity: 'info' as const,
+          title: `Optimize ${fn.name}`,
+          detail: 'Current source function is marked for evidence-guided optimization and verification.',
+          functionName: fn.name,
+          location: { file: fn.file, line: fn.startLine },
+          createdAt: Date.now()
+        };
+        const updated = existing ? { ...investigation } : {
+          ...investigation,
+          findings: [...investigation.findings, target]
+        };
+        updated.targetFindingId = target.id;
+        updated.updatedAt = Date.now();
+        replaceInvestigation(updated);
+        void vscode.window.showInformationMessage(
+          `GoTune: ${fn.name} is now the optimization target.`
+        );
+      }
+    ),
+    vscode.commands.registerCommand(
+      'gotune.verifyCurrentFunction',
+      async (requested?: GoFunctionReference) => {
+        const fn = isGoFunctionReference(requested) ? requested : await functionAtEditor();
+        if (!fn) {
+          void vscode.window.showInformationMessage('GoTune: Put the cursor inside a Go function first.');
+          return;
+        }
+        const investigation = currentInvestigation();
+        const scenario = scenarios.find((candidate) => candidate.id === investigation?.scenarioId);
+        if (scenario) {
+          await runScenario(scenario);
+          return;
+        }
+        const report = collectFunctionEvidence(
+          fn,
+          currentFunctionEvidenceSessions(),
+          activeBaselineSessionIds(),
+          configuredSourcePathMappings(),
+          investigation?.findings ?? []
+        );
+        const choices = latestFunctionEvidence(report.items)
+          .filter((item) => !sessions.find((session) => session.id === item.sessionId)?.source.startsWith('trace:'))
+          .map((item) => ({
+            label: functionEvidenceKindLabel(item.kind),
+            description: `${item.sessionName} · ${formatValue(item.cumulative, item.sampleUnit)}`,
+            item
+          }));
+        const selected = choices.length === 1 ? choices[0] : await vscode.window.showQuickPick(choices, {
+          title: `Verify ${fn.name}`,
+          placeHolder: 'Choose the evidence protocol to repeat'
+        });
+        if (!selected) {
+          void vscode.window.showInformationMessage(
+            'GoTune: Capture CPU, allocation, live-memory, or contention evidence for this function first.'
+          );
+          return;
+        }
+        await verifyFunctionEvidence(fn, selected.item);
+      }
+    ),
     vscode.commands.registerCommand('gotune.captureFunctionEvidence', async (kind: EvidenceKind) => {
+      if (kind === 'allocation') {
+        if (!await ensureTargetRunningForCapture()) return;
+        const seconds = vscode.workspace
+          .getConfiguration('gotune')
+          .get<number>('captureCpuSeconds', 10);
+        await captureManagedProfiles(
+          `allocs?seconds=${seconds}`,
+          'Current function allocation delta',
+          ['alloc_space', 'alloc_objects'],
+          seconds * 1000 + 15_000
+        );
+        return;
+      }
       const command = kind === 'cpu'
         ? 'gotune.captureCpu'
-        : kind === 'allocation' ? 'gotune.captureAllocations' : 'gotune.captureHeap';
+        : kind === 'trace'
+          ? 'gotune.captureTrace'
+        : kind === 'goroutine' || kind === 'blocking'
+          ? 'gotune.monitorGoroutines'
+          : 'gotune.captureHeap';
       await captureEvidenceForCurrentFunction(command);
     }),
     vscode.commands.registerCommand(
       'gotune.inspectStructLayout',
       async (requested?: { name: string; file: string; startLine: number; endLine: number }) => {
-        const struct = requested ?? await structAtEditor();
+        const struct = isGoStructReference(requested) ? requested : await structAtEditor();
         if (!struct) {
           void vscode.window.showInformationMessage('GoTune: Put the cursor inside a Go struct type first.');
           return;
@@ -865,12 +1109,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!finding?.location) return;
       const session = sessions.find((candidate) => candidate.id === finding.captureId);
       if (session) setActive(session);
-      await openSource(
-        finding.location.file,
-        finding.location.line,
-        heatDecoration,
-        heatLabelDecoration
-      );
+      await openSourceAndInspect(finding.location.file, finding.location.line);
     }),
     vscode.commands.registerCommand(
       'gotune.openFindingEvidence',
@@ -892,7 +1131,7 @@ export function activate(context: vscode.ExtensionContext): void {
             && candidate.location.line === finding.location!.line
           )
           : undefined;
-        showSessionProfile(session, hotspot);
+        void showSessionProfile(session, hotspot);
       }
     ),
     vscode.commands.registerCommand(
@@ -935,6 +1174,11 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         if (finding.kind === 'blocking' || finding.kind === 'goroutine') {
           actions.push(
+            ...(finding.location ? [{
+              label: 'Find related channel or lock code',
+              description: 'Locate senders, receivers, lock owners, and wait/signal sites',
+              action: 'sync-references'
+            }] : []),
             {
               label: 'Inspect goroutine progress',
               description: 'Repeated stacks distinguish stable blocking from normal waits',
@@ -992,6 +1236,8 @@ export function activate(context: vscode.ExtensionContext): void {
           await vscode.commands.executeCommand('gotune.startInvestigation');
         } else if (selected.action === 'goroutines') {
           await vscode.commands.executeCommand('gotune.monitorGoroutines');
+        } else if (selected.action === 'sync-references') {
+          await vscode.commands.executeCommand('gotune.findRelatedSyncCode', finding);
         } else if (selected.action === 'trace') {
           await vscode.commands.executeCommand('gotune.captureTrace');
         } else if (selected.action === 'cpu') {
@@ -1006,6 +1252,19 @@ export function activate(context: vscode.ExtensionContext): void {
           investigationProvider.refresh();
           void vscode.window.showInformationMessage(`GoTune: "${finding.title}" is now the optimization target.`);
         }
+      }
+    ),
+    vscode.commands.registerCommand(
+      'gotune.findRelatedSyncCode',
+      async (input?: InvestigationFindingItem | PerformanceFinding) => {
+        const finding = findingFromInput(input);
+        if (!finding?.location) {
+          void vscode.window.showInformationMessage(
+            'GoTune: This finding has no source location to search from.'
+          );
+          return;
+        }
+        await showRelatedSyncCode(finding.location);
       }
     ),
     vscode.commands.registerCommand('gotune.analyzeEscape', async (item?: HotspotItem) => {
@@ -1034,6 +1293,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       persist();
       updateContexts();
+      runningProvider.refresh();
       sessionProvider.refresh();
       investigationProvider.refresh();
       codeLensProvider.refresh();
@@ -1075,18 +1335,16 @@ export function activate(context: vscode.ExtensionContext): void {
         editor.setDecorations(heatDecoration, []);
         editor.setDecorations(heatLabelDecoration, []);
       }
+      void pprofViewer.clear();
       persist();
       updateContexts();
+      runningProvider.refresh();
       sessionProvider.refresh();
       investigationProvider.refresh();
       findingsProvider.refresh();
       codeLensProvider.refresh();
     }),
     vscode.languages.registerCodeLensProvider({ language: 'go', scheme: 'file' }, codeLensProvider),
-    vscode.languages.registerHoverProvider(
-      { language: 'go', scheme: 'file' },
-      new FunctionEvidenceHoverProvider()
-    ),
     vscode.languages.registerCodeActionsProvider(
       { language: 'go', scheme: 'file' },
       new FunctionEvidenceCodeActionProvider(),
@@ -1102,14 +1360,21 @@ export function activate(context: vscode.ExtensionContext): void {
   }
   void refreshFindingDiagnostics();
 
-  function addSession(session: ProfileSession, showResult = true): void {
+  function addSession(
+    session: ProfileSession,
+    showResult = true,
+    forcedInvestigationId?: string
+  ): void {
     sessions.unshift(session);
     const sessionTarget = session.target ?? activeTargetIdentity();
     const current = currentInvestigation();
-    const investigation = current?.scenarioId
+    const forcedInvestigation = forcedInvestigationId
+      ? investigations.find((candidate) => candidate.id === forcedInvestigationId)
+      : undefined;
+    const investigation = forcedInvestigation ?? (current?.scenarioId
       && (!current.target || !sessionTarget || current.target === sessionTarget)
       ? current
-      : ensureInvestigation(problemForSampleType(session.sampleType), sessionTarget);
+      : ensureInvestigation(problemForSampleType(session.sampleType), sessionTarget));
     const updated = addCaptureToInvestigation(investigation, session);
     const investigationIndex = investigations.findIndex((item) => item.id === updated.id);
     investigations[investigationIndex] = updated;
@@ -1136,6 +1401,23 @@ export function activate(context: vscode.ExtensionContext): void {
       return current;
     }
     const investigation = createInvestigation(problem, target);
+    investigations.unshift(investigation);
+    activeInvestigationId = investigation.id;
+    persist();
+    investigationProvider.refresh();
+    findingsProvider.refresh();
+    return investigation;
+  }
+
+  function ensureCodeCaptureInvestigation(target?: string): Investigation {
+    const current = currentInvestigation();
+    if (
+      current?.problem === 'code'
+      && (!current.target || !target || current.target === target)
+    ) {
+      return current;
+    }
+    const investigation = createInvestigation('code', target);
     investigations.unshift(investigation);
     activeInvestigationId = investigation.id;
     persist();
@@ -1174,6 +1456,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     persist();
     updateContexts();
+    runningProvider.refresh();
     sessionProvider.refresh();
     findingsProvider.refresh();
     codeLensProvider.refresh();
@@ -1251,7 +1534,9 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!selected) return undefined;
       selectedType = selected.sampleType;
     }
-    return parseProfile(bytes, name, source, selectedType);
+    const session = parseProfile(bytes, name, source, selectedType);
+    pprofViewer.registerProfile(session.id, bytes);
+    return session;
   }
 
   async function captureManagedProfile(
@@ -1259,12 +1544,31 @@ export function activate(context: vscode.ExtensionContext): void {
     label: string,
     preferredSampleType?: string,
     timeoutMs?: number,
-    showResult = true
+    showResult = true,
+    investigationId?: string
   ): Promise<ProfileSession | undefined> {
+    return (await captureManagedProfiles(
+      endpoint,
+      label,
+      [preferredSampleType],
+      timeoutMs,
+      showResult,
+      investigationId
+    ))[0];
+  }
+
+  async function captureManagedProfiles(
+    endpoint: string,
+    label: string,
+    preferredSampleTypes: Array<string | undefined>,
+    timeoutMs?: number,
+    showResult = true,
+    investigationId?: string
+  ): Promise<ProfileSession[]> {
     const baseUrl = runner.snapshot.pprofUrl;
     if (runner.snapshot.status !== 'running' || !baseUrl) {
       void vscode.window.showInformationMessage('GoTune: Start a target with Run with Profiler first.');
-      return undefined;
+      return [];
     }
     const profileUrl = buildProfileUrl(baseUrl, endpoint);
     try {
@@ -1277,23 +1581,38 @@ export function activate(context: vscode.ExtensionContext): void {
         () => fetchBuffer(profileUrl, 0, timeoutMs)
       );
       const timestamp = new Date().toLocaleTimeString();
-      const session = parseProfile(bytes, `${label} ${timestamp}`, profileUrl, preferredSampleType);
       const durationMatch = /(?:^|[?&])seconds=(\d+)/.exec(profileUrl);
-      session.target = activeTargetIdentity();
-      session.processStartedAt = runner.snapshot.startedAt;
-      session.captureDurationMs = durationMatch ? Number(durationMatch[1]) * 1000 : undefined;
-      session.captureMode = durationMatch ? 'delta' : 'snapshot';
-      session.scenarioId = currentInvestigation()?.scenarioId;
-      addSession(session, showResult);
-      if (session.sampleType === 'cpu' && session.total === 0) {
+      const captured = preferredSampleTypes.map((preferredSampleType) => {
+        const session = parseProfile(
+          bytes,
+          `${label}${preferredSampleTypes.length > 1 && preferredSampleType
+            ? ` ${preferredSampleType}`
+            : ''} ${timestamp}`,
+          profileUrl,
+          preferredSampleType
+        );
+        session.target = activeTargetIdentity();
+        session.processStartedAt = runner.snapshot.startedAt;
+        session.captureDurationMs = durationMatch ? Number(durationMatch[1]) * 1000 : undefined;
+        session.captureMode = durationMatch ? 'delta' : 'snapshot';
+        session.scenarioId = currentInvestigation()?.scenarioId;
+        return session;
+      });
+      pprofViewer.registerProfile(captured.map((session) => session.id), bytes);
+      captured.forEach((session, index) => addSession(
+        session,
+        showResult && index === captured.length - 1,
+        investigationId
+      ));
+      if (captured.some((session) => session.sampleType === 'cpu' && session.total === 0)) {
         void vscode.window.showWarningMessage(
           'GoTune: No CPU samples were recorded. The target was idle; generate workload during the capture window.'
         );
       }
-      return session;
+      return captured;
     } catch (error) {
       void vscode.window.showErrorMessage(`GoTune: ${errorMessage(error)}`);
-      return undefined;
+      return [];
     }
   }
 
@@ -1328,7 +1647,7 @@ export function activate(context: vscode.ExtensionContext): void {
   async function runGuidedInvestigation(): Promise<void> {
     const selected = await vscode.window.showQuickPick([
       {
-        label: 'CPU high or operation is slow',
+        label: 'CPU usage is high',
         description: 'CPU profile with source self/cumulative evidence',
         problem: 'cpu' as ProblemKind
       },
@@ -1348,8 +1667,8 @@ export function activate(context: vscode.ExtensionContext): void {
         problem: 'blocking' as ProblemKind
       },
       {
-        label: 'Latency is high but CPU is unclear',
-        description: 'CPU, goroutines, contention, and optional execution trace',
+        label: 'Operation or request is slow',
+        description: 'CPU plus waiting evidence, followed by trace when exact timing is needed',
         problem: 'latency' as ProblemKind
       }
     ], {
@@ -1357,9 +1676,27 @@ export function activate(context: vscode.ExtensionContext): void {
       placeHolder: 'Describe the symptom; GoTune will choose the evidence'
     });
     if (!selected) return;
+    const needsContention = selected.problem === 'blocking' || selected.problem === 'latency';
+    if (
+      runner.snapshot.status === 'running'
+      && needsContention
+      && !runner.snapshot.contentionProfilesEnabled
+    ) {
+      const action = await vscode.window.showInformationMessage(
+        'GoTune needs to restart this managed target to enable Mutex and Block sampling for the investigation.',
+        { modal: true },
+        'Restart with full evidence',
+        'Use goroutine stacks only'
+      );
+      if (action === 'Restart with full evidence') {
+        if (!await restartTargetForVerification(true)) return;
+      } else if (action !== 'Use goroutine stacks only') {
+        return;
+      }
+    }
     if (runner.snapshot.status !== 'running') {
       await vscode.commands.executeCommand('gotune.runWithProfiler', {
-        enableContentionProfiles: selected.problem === 'blocking' || selected.problem === 'latency'
+        enableContentionProfiles: needsContention
       });
       const statusAfterStart: string = runner.snapshot.status;
       if (statusAfterStart !== 'running') return;
@@ -1390,16 +1727,16 @@ export function activate(context: vscode.ExtensionContext): void {
           false
         );
       } else if (selected.problem === 'allocations') {
-        await captureManagedProfile(
+        await captureManagedProfiles(
           `allocs?seconds=${seconds}`,
           'Allocation delta',
-          'alloc_space',
+          ['alloc_space', 'alloc_objects'],
           seconds * 1000 + 15_000,
           false
         );
       } else {
         const captures: Promise<unknown>[] = [
-          captureScenarioGoroutines(investigation.id)
+          captureScenarioGoroutines(investigation.id, seconds)
         ];
         if (selected.problem === 'latency') {
           captures.push(captureManagedProfile(
@@ -1454,15 +1791,20 @@ export function activate(context: vscode.ExtensionContext): void {
     investigation: Investigation,
     seconds: number
   ): Promise<void> {
+    const runtimeBefore = await captureRuntimeMetricsSnapshot();
     const heaps: ProfileSession[] = [];
-    const baseline = await captureManagedProfile(
+    const heapObjects: ProfileSession[] = [];
+    const baselineCaptures = await captureManagedProfiles(
       'heap?gc=1',
       'Memory growth baseline',
-      'inuse_space',
+      ['inuse_space', 'inuse_objects'],
       undefined,
       false
     );
+    const baseline = baselineCaptures.find((session) => session.sampleType === 'inuse_space');
+    const baselineObjects = baselineCaptures.find((session) => session.sampleType === 'inuse_objects');
     if (baseline) heaps.push(baseline);
+    if (baselineObjects) heapObjects.push(baselineObjects);
     const start = await vscode.window.showInformationMessage(
       `GoTune: Run the suspected leaking operation during the next ${seconds} seconds.`,
       { modal: true },
@@ -1470,24 +1812,27 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     if (start !== 'Start round 1') return;
     await Promise.all([
-      captureManagedProfile(
+      captureManagedProfiles(
         `allocs?seconds=${seconds}`,
         'Allocation delta during memory investigation',
-        'alloc_space',
+        ['alloc_space', 'alloc_objects'],
         seconds * 1000 + 15_000,
         false
       ),
-      captureScenarioGoroutines(investigation.id),
+      captureScenarioGoroutines(investigation.id, seconds),
       delay(seconds * 1000)
     ]);
-    const after = await captureManagedProfile(
+    const afterCaptures = await captureManagedProfiles(
       'heap?gc=1',
       'Memory growth round 1',
-      'inuse_space',
+      ['inuse_space', 'inuse_objects'],
       undefined,
       false
     );
+    const after = afterCaptures.find((session) => session.sampleType === 'inuse_space');
+    const afterObjects = afterCaptures.find((session) => session.sampleType === 'inuse_objects');
     if (after) heaps.push(after);
+    if (afterObjects) heapObjects.push(afterObjects);
     const repeat = await vscode.window.showInformationMessage(
       `GoTune: Repeat the same operation once more during the next ${seconds} seconds.`,
       { modal: true },
@@ -1495,23 +1840,55 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     if (repeat !== 'Start round 2') return;
     await delay(seconds * 1000);
-    const recovery = await captureManagedProfile(
+    const recoveryCaptures = await captureManagedProfiles(
       'heap?gc=1',
       'Memory growth round 2',
-      'inuse_space',
+      ['inuse_space', 'inuse_objects'],
       undefined,
       false
     );
+    const recovery = recoveryCaptures.find((session) => session.sampleType === 'inuse_space');
+    const recoveryObjects = recoveryCaptures.find((session) => session.sampleType === 'inuse_objects');
     if (recovery) heaps.push(recovery);
-    if (heaps.length !== 3) return;
+    if (recoveryObjects) heapObjects.push(recoveryObjects);
+    if (heaps.length !== 3 || heapObjects.length !== 3) return;
     const trend = analyzeMemoryTrend(heaps);
+    const objectTrend = analyzeMemoryTrend(heapObjects);
+    const runtimeAfter = await captureRuntimeMetricsSnapshot();
     const latest = investigations.find((candidate) => candidate.id === investigation.id);
     if (latest) {
-      replaceInvestigation(addFindingsToInvestigation(
+      const withBytes = addFindingsToInvestigation(
         latest,
         findingsFromMemoryTrend(latest.id, trend),
         'memory-trend-'
-      ));
+      );
+      let updated = addFindingsToInvestigation(
+        withBytes,
+        findingsFromMemoryTrend(
+          latest.id,
+          objectTrend,
+          Date.now(),
+          'memory-object-trend'
+        ),
+        'memory-object-trend-'
+      );
+      if (runtimeBefore && runtimeAfter) {
+        const elapsedSeconds = Math.max(
+          1,
+          (runtimeAfter.timestamp - runtimeBefore.timestamp) / 1000
+        );
+        const allocated = runtimeAfter.totalAlloc - runtimeBefore.totalAlloc;
+        updated = addFindingsToInvestigation(updated, [{
+          id: `memory-runtime-${runtimeAfter.timestamp}`,
+          investigationId: latest.id,
+          kind: 'allocation',
+          severity: 'info',
+          title: 'Runtime allocation and GC trend',
+          detail: `${formatValue(allocated / elapsedSeconds, 'bytes')}/s allocated · ${runtimeAfter.numGC - runtimeBefore.numGC} GC cycle(s) · ${formatValue(runtimeAfter.pauseTotalNs - runtimeBefore.pauseTotalNs, 'nanoseconds')} GC pause.`,
+          createdAt: runtimeAfter.timestamp
+        }], 'memory-runtime-');
+      }
+      replaceInvestigation(updated);
     }
     showMemoryTrendPanel(
       trend,
@@ -1526,6 +1903,19 @@ export function activate(context: vscode.ExtensionContext): void {
     return goroutineTracker.capture(bytes.toString('utf8'));
   }
 
+  async function captureRuntimeMetricsSnapshot(): Promise<RuntimeMetrics | undefined> {
+    const baseUrl = runner.snapshot.pprofUrl;
+    if (runner.snapshot.status !== 'running' || !baseUrl) return undefined;
+    try {
+      return parseRuntimeMetrics(
+        await fetchBuffer(buildProfileUrl(baseUrl, '../gotune/runtime'))
+      );
+    } catch (error) {
+      targetOutput.appendLine(`[GoTune] Runtime metrics snapshot failed: ${errorMessage(error)}`);
+      return undefined;
+    }
+  }
+
   async function promptForScenario(): Promise<PerformanceScenario | undefined> {
     const name = await vscode.window.showInputBox({
       title: 'Create Performance Scenario',
@@ -1535,11 +1925,11 @@ export function activate(context: vscode.ExtensionContext): void {
     });
     if (!name) return undefined;
     const problem = await vscode.window.showQuickPick([
-      { label: 'Operation is slow / CPU high', problem: 'cpu' as ProblemKind },
+      { label: 'CPU usage is high', problem: 'cpu' as ProblemKind },
       { label: 'Memory keeps growing', problem: 'memory-growth' as ProblemKind },
       { label: 'Too many allocations / GC pressure', problem: 'allocations' as ProblemKind },
       { label: 'Request stuck / possible deadlock', problem: 'blocking' as ProblemKind },
-      { label: 'Latency is high', problem: 'latency' as ProblemKind }
+      { label: 'Operation or request is slow', problem: 'latency' as ProblemKind }
     ], { title: 'What should this scenario investigate?' });
     if (!problem) return undefined;
     const workloadKind = await vscode.window.showQuickPick([
@@ -1554,6 +1944,8 @@ export function activate(context: vscode.ExtensionContext): void {
       : await pickScenarioTarget();
     if (!targetChoice) return undefined;
     let workload: string | undefined;
+    let workloadTaskSource: string | undefined;
+    let workloadTaskDefinition: string | undefined;
     let benchmarkCount: number | undefined;
     let benchmarkTime: string | undefined;
     if (workloadKind.workloadKind === 'vscode-task') {
@@ -1568,6 +1960,8 @@ export function activate(context: vscode.ExtensionContext): void {
       );
       if (!selected) return undefined;
       workload = selected.task.name;
+      workloadTaskSource = selected.task.source;
+      workloadTaskDefinition = stableJson(selected.task.definition);
     } else if (workloadKind.workloadKind === 'command') {
       workload = await vscode.window.showInputBox({
         title: 'Workload Command',
@@ -1720,6 +2114,8 @@ export function activate(context: vscode.ExtensionContext): void {
       problem: problem.problem,
       workloadKind: workloadKind.workloadKind,
       workload,
+      workloadTaskSource,
+      workloadTaskDefinition,
       warmupSeconds: Number(warmupText),
       captureSeconds: Number(captureText),
       captureKinds: captures.map((capture) => capture.evidenceKind),
@@ -1753,6 +2149,26 @@ export function activate(context: vscode.ExtensionContext): void {
       await runBenchmarkScenario(scenario);
       return;
     }
+    const requiresContention = scenario.captureKinds.includes('blocking');
+    const hasRepeatableTarget = Boolean(
+      scenario.launchConfiguration || (scenario.targetDirectory && scenario.target)
+    );
+    if (runner.snapshot.status === 'running' && hasRepeatableTarget) {
+      await runner.stop();
+    }
+    if (
+      runner.snapshot.status === 'running'
+      && requiresContention
+      && !runner.snapshot.contentionProfilesEnabled
+    ) {
+      if (!scenario.launchConfiguration && !(scenario.targetDirectory && scenario.target)) {
+        void vscode.window.showErrorMessage(
+          'GoTune: This scenario requires Mutex/Block sampling. Stop and restart its target with contention profiling enabled.'
+        );
+        return;
+      }
+      await runner.stop();
+    }
     if (runner.snapshot.status !== 'running') {
       if (scenario.launchConfiguration) {
         const launch = goLaunchConfigurations().find((candidate) =>
@@ -1764,7 +2180,7 @@ export function activate(context: vscode.ExtensionContext): void {
             `Launch configuration "${scenario.launchConfiguration}" no longer exists in ${scenario.launchWorkspaceFolder}`
           );
         }
-        await startLaunchWithProfiler(launch);
+        await startLaunchWithProfiler(launch, requiresContention);
       } else if (scenario.targetDirectory && scenario.target) {
         const execution = resolveGoExecutionConfiguration();
         const configuration = vscode.workspace.getConfiguration('gotune');
@@ -1777,10 +2193,13 @@ export function activate(context: vscode.ExtensionContext): void {
           buildFlags: execution.buildFlags,
           programArguments: configuration.get<string[]>('runArguments', []),
           environment: execution.environment,
-          enableContentionProfiles: configuration.get<boolean>('enableContentionProfiles', false)
+          enableContentionProfiles: requiresContention
+            || configuration.get<boolean>('enableContentionProfiles', false)
         });
       } else {
-        await vscode.commands.executeCommand('gotune.runWithProfiler');
+        await vscode.commands.executeCommand('gotune.runWithProfiler', {
+          enableContentionProfiles: requiresContention
+        });
       }
       const statusAfterStart: string = runner.snapshot.status;
       if (statusAfterStart !== 'running') return;
@@ -1808,6 +2227,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
     let workloadExecution: vscode.TaskExecution | undefined;
     let completed: boolean;
+    const runtimeMetrics: Record<string, number> = {};
+    let runtimeBefore: RuntimeMetrics | undefined;
     try {
       completed = await vscode.window.withProgress(
         {
@@ -1821,18 +2242,23 @@ export function activate(context: vscode.ExtensionContext): void {
           await delay(scenario.warmupSeconds * 1000);
         }
         const heapSnapshots: ProfileSession[] = [];
+        const heapObjectSnapshots: ProfileSession[] = [];
         if (scenario.captureKinds.includes('live-memory')) {
           progress.report({ message: 'capturing post-GC heap baseline' });
-          const baseline = await captureManagedProfile(
+          const captured = await captureManagedProfiles(
             'heap?gc=1',
             `${scenario.name} heap baseline`,
-            'inuse_space',
+            ['inuse_space', 'inuse_objects'],
             undefined,
             false
           );
+          const baseline = captured.find((session) => session.sampleType === 'inuse_space');
+          const objects = captured.find((session) => session.sampleType === 'inuse_objects');
           if (baseline) heapSnapshots.push(baseline);
+          if (objects) heapObjectSnapshots.push(objects);
         }
 
+        runtimeBefore = await captureRuntimeMetricsSnapshot();
         progress.report({ message: 'starting workload' });
         const workload = await startScenarioWorkload(scenario);
         if (!workload.started) return false;
@@ -1848,16 +2274,24 @@ export function activate(context: vscode.ExtensionContext): void {
           ));
         }
         if (scenario.captureKinds.includes('allocation')) {
-          timedCaptures.push(captureManagedProfile(
+          timedCaptures.push(captureManagedProfiles(
             `allocs?seconds=${scenario.captureSeconds}`,
             `${scenario.name} allocations`,
-            'alloc_space',
+            ['alloc_space', 'alloc_objects'],
             scenario.captureSeconds * 1000 + 15_000,
             false
           ));
         }
         if (scenario.captureKinds.includes('goroutine')) {
-          timedCaptures.push(captureScenarioGoroutines(investigation!.id));
+          timedCaptures.push(
+            captureScenarioGoroutines(investigation!.id, scenario.captureSeconds)
+              .then((snapshot) => {
+                if (!snapshot) return;
+                runtimeMetrics.goroutine_count = snapshot.total;
+                runtimeMetrics.goroutine_growth = snapshot.totalGrowth;
+                runtimeMetrics.suspicious_goroutines = snapshot.suspiciousCount;
+              })
+          );
         }
         if (scenario.captureKinds.includes('blocking')) {
           timedCaptures.push(captureScenarioContention(scenario));
@@ -1869,32 +2303,55 @@ export function activate(context: vscode.ExtensionContext): void {
         }
 
         if (scenario.captureKinds.includes('live-memory')) {
+          workloadExecution?.terminate();
+          workloadExecution = undefined;
           progress.report({ message: 'capturing post-workload live heap' });
-          const after = await captureManagedProfile(
+          const afterCaptured = await captureManagedProfiles(
             'heap?gc=1',
             `${scenario.name} heap after`,
-            'inuse_space',
+            ['inuse_space', 'inuse_objects'],
             undefined,
             false
           );
+          const after = afterCaptured.find((session) => session.sampleType === 'inuse_space');
+          const afterObjects = afterCaptured.find((session) => session.sampleType === 'inuse_objects');
           if (after) heapSnapshots.push(after);
+          if (afterObjects) heapObjectSnapshots.push(afterObjects);
           await delay(2000);
-          const recovery = await captureManagedProfile(
+          const recoveryCaptured = await captureManagedProfiles(
             'heap?gc=1',
             `${scenario.name} heap recovery`,
-            'inuse_space',
+            ['inuse_space', 'inuse_objects'],
             undefined,
             false
           );
+          const recovery = recoveryCaptured.find((session) => session.sampleType === 'inuse_space');
+          const recoveryObjects = recoveryCaptured.find((session) => session.sampleType === 'inuse_objects');
           if (recovery) heapSnapshots.push(recovery);
-          if (heapSnapshots.length === 3) {
+          if (recoveryObjects) heapObjectSnapshots.push(recoveryObjects);
+          if (heapSnapshots.length === 3 && heapObjectSnapshots.length === 3) {
             const trend = analyzeMemoryTrend(heapSnapshots);
+            const objectTrend = analyzeMemoryTrend(heapObjectSnapshots);
+            runtimeMetrics.live_heap_growth_bytes = trend.totalGrowth;
+            runtimeMetrics.live_heap_after_bytes = trend.totals.at(-1) ?? 0;
+            runtimeMetrics.live_object_growth = objectTrend.totalGrowth;
+            runtimeMetrics.live_objects_after = objectTrend.totals.at(-1) ?? 0;
             const current = currentInvestigation();
             if (current) {
-              replaceInvestigation(addFindingsToInvestigation(
+              const withBytes = addFindingsToInvestigation(
                 current,
                 findingsFromMemoryTrend(current.id, trend),
                 'memory-trend-'
+              );
+              replaceInvestigation(addFindingsToInvestigation(
+                withBytes,
+                findingsFromMemoryTrend(
+                  current.id,
+                  objectTrend,
+                  Date.now(),
+                  'memory-object-trend'
+                ),
+                'memory-object-trend-'
               ));
             }
           }
@@ -1906,15 +2363,20 @@ export function activate(context: vscode.ExtensionContext): void {
       workloadExecution?.terminate();
     }
     if (!completed) return;
+    const runtimeAfter = await captureRuntimeMetricsSnapshot();
+    if (runtimeBefore && runtimeAfter) {
+      Object.assign(runtimeMetrics, runtimeMetricsBetween(runtimeBefore, runtimeAfter));
+    }
     const runCaptures = sessions.filter((session) =>
       session.scenarioId === scenario.id && session.importedAt >= runStartedAt
     );
+    Object.assign(runtimeMetrics, profileRuntimeMetrics(runCaptures));
     verifyScenarioCaptures(investigation.id, runCaptures);
-    let metrics: Record<string, number> = {};
+    let businessMetrics: Record<string, number> = {};
     if (scenario.metricsAdapter && scenario.targetDirectory) {
       try {
         const execution = resolveGoExecutionConfiguration();
-        metrics = await collectScenarioMetrics({
+        businessMetrics = await collectScenarioMetrics({
           adapter: scenario.metricsAdapter,
           directory: scenario.targetDirectory,
           environment: execution.environment,
@@ -1934,7 +2396,7 @@ export function activate(context: vscode.ExtensionContext): void {
       finishedAt: Date.now(),
       target,
       captureIds: runCaptures.map((capture) => capture.id),
-      metrics,
+      metrics: { ...runtimeMetrics, ...businessMetrics },
       gitCommit: gitState?.commit,
       gitDirty: gitState?.dirty,
       gitDiffSummary: gitState?.diffSummary
@@ -1973,7 +2435,14 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     if (scenario.workloadKind === 'vscode-task') {
       const tasks = await vscode.tasks.fetchTasks();
-      const task = tasks.find((candidate) => candidate.name === scenario.workload);
+      const task = tasks.find((candidate) =>
+        candidate.name === scenario.workload
+        && (!scenario.workloadTaskSource || candidate.source === scenario.workloadTaskSource)
+        && (
+          !scenario.workloadTaskDefinition
+          || stableJson(candidate.definition) === scenario.workloadTaskDefinition
+        )
+      );
       if (!task) throw new Error(`VS Code task "${scenario.workload}" no longer exists`);
       return { started: true, execution: await vscode.tasks.executeTask(task) };
     }
@@ -1983,7 +2452,10 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.TaskScope.Workspace,
       `GoTune: ${scenario.name}`,
       'GoTune',
-      new vscode.ShellExecution(scenario.workload)
+      new vscode.ShellExecution(
+        scenario.workload,
+        scenario.targetDirectory ? { cwd: scenario.targetDirectory } : undefined
+      )
     );
     return { started: true, execution: await vscode.tasks.executeTask(task) };
   }
@@ -2045,6 +2517,7 @@ export function activate(context: vscode.ExtensionContext): void {
         'cpu'
       );
       annotateBenchmarkSession(session, scenario, capturedAt);
+      pprofViewer.registerProfile(session.id, result.cpuProfile);
       captures.push(session);
       addSession(session, false);
     }
@@ -2056,6 +2529,7 @@ export function activate(context: vscode.ExtensionContext): void {
         'alloc_space'
       );
       annotateBenchmarkSession(session, scenario, capturedAt);
+      pprofViewer.registerProfile(session.id, result.memoryProfile);
       captures.push(session);
       addSession(session, false);
     }
@@ -2202,7 +2676,8 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   async function startLaunchWithProfiler(
-    selected?: GoLaunchConfiguration
+    selected?: GoLaunchConfiguration,
+    enableContentionProfiles?: boolean
   ): Promise<void> {
     const launch = selected ?? await pickGoLaunchConfiguration();
     if (!launch) return;
@@ -2225,25 +2700,36 @@ export function activate(context: vscode.ExtensionContext): void {
         configuration: launch.configuration,
         goExecutable: execution.goExecutable,
         environment: execution.environment,
-        enableContentionProfiles: configuration.get<boolean>('enableContentionProfiles', false)
+        enableContentionProfiles: enableContentionProfiles
+          ?? configuration.get<boolean>('enableContentionProfiles', false)
       })
     );
   }
 
-  async function captureScenarioGoroutines(investigationId: string): Promise<void> {
+  async function captureScenarioGoroutines(
+    investigationId: string,
+    durationSeconds = 4
+  ) {
     goroutineTracker.reset();
     let snapshot = await captureGoroutineSnapshot();
+    const intervalMs = Math.max(1000, durationSeconds * 1000 / 2);
     for (let index = 1; index < 3; index++) {
-      await delay(2000);
+      await delay(intervalMs);
       snapshot = await captureGoroutineSnapshot();
     }
     const investigation = investigations.find((item) => item.id === investigationId);
     if (!investigation) return;
     replaceInvestigation(addFindingsToInvestigation(
       investigation,
-      findingsFromGoroutines(investigationId, snapshot),
+      findingsFromGoroutines(
+        investigationId,
+        snapshot,
+        Date.now(),
+        isWorkspaceSourcePath
+      ),
       'goroutine-'
     ));
+    return snapshot;
   }
 
   async function captureScenarioContention(scenario: PerformanceScenario): Promise<void> {
@@ -2338,41 +2824,303 @@ export function activate(context: vscode.ExtensionContext): void {
     await vscode.commands.executeCommand(command);
   }
 
-  function showSessionProfile(session: ProfileSession, focusedHotspot?: Hotspot): void {
-    const baseline = sessions.find((candidate) => candidate.id === baselineSessionId);
-    const baselineState = baseline?.id === session.id
-      ? 'current'
-      : baseline?.sampleType === session.sampleType && baseline.sampleUnit === session.sampleUnit
-        ? 'available'
-        : 'none';
-    showProfilePanel(
-      session,
-      (file, line) => void openSource(file, line, heatDecoration, heatLabelDecoration),
-      focusedHotspot,
-      (action, hotspot) => {
-        if (action === 'escape') {
-          void vscode.commands.executeCommand(
-            'gotune.analyzeEscape',
-            hotspot ? new HotspotItem(hotspot, session) : undefined
-          );
-        } else if (action === 'baseline') {
-          void vscode.commands.executeCommand('gotune.setBaseline', new SessionItem(session));
-        } else if (action === 'compare') {
-          void vscode.commands.executeCommand('gotune.compareWithBaseline', new SessionItem(session));
-        } else {
-          const kind = profileKind(session.sampleType);
-          const command = kind === 'allocation'
-            ? 'gotune.captureAllocations'
-            : kind === 'memory'
-              ? 'gotune.checkMemoryGrowth'
-              : kind === 'blocking'
-                ? (/mutex/i.test(`${session.sampleType} ${session.name}`) ? 'gotune.captureMutex' : 'gotune.captureBlock')
-                : 'gotune.captureCpu';
-          void vscode.commands.executeCommand(command);
-        }
-      },
-      baselineState
+  async function verifyFunctionEvidence(
+    fn: GoFunctionReference,
+    item: FunctionEvidenceItem
+  ): Promise<void> {
+    let baseline = sessions.find((session) => session.id === item.sessionId);
+    if (!baseline) return;
+    let investigation = currentInvestigation() ?? ensureInvestigation('code', activeTargetIdentity());
+    const key = sessionMetricKey(baseline);
+    const savedBaseline = sessions.find(
+      (session) => session.id === investigation.baselineByMetric[key]
     );
+    if (!savedBaseline) {
+      if (item.kind === 'allocation' && baseline.captureMode !== 'delta') {
+        if (!await ensureTargetRunningForCapture()) return;
+        const seconds = vscode.workspace
+          .getConfiguration('gotune')
+          .get<number>('captureCpuSeconds', 10);
+        const timed = await captureManagedProfile(
+          `allocs?seconds=${seconds}`,
+          `${fn.name} allocation baseline`,
+          'alloc_space',
+          seconds * 1000 + 15_000,
+          false
+        );
+        if (!timed) return;
+        baseline = timed;
+        investigation = currentInvestigation() ?? investigation;
+      }
+      const updated = {
+        ...investigation,
+        baselineByMetric: {
+          ...investigation.baselineByMetric,
+          [sessionMetricKey(baseline)]: baseline.id
+        },
+        updatedAt: Date.now()
+      };
+      replaceInvestigation(updated);
+      void vscode.window.showInformationMessage(
+        `GoTune: Saved ${fn.name} ${functionEvidenceKindLabel(item.kind)} baseline. Modify the code, then run Verify Current Function again.`
+      );
+      return;
+    }
+    baseline = savedBaseline;
+    if (!await restartTargetForVerification()) return;
+    if (
+      baseline.target
+      && activeTargetIdentity()
+      && baseline.target !== activeTargetIdentity()
+    ) {
+      void vscode.window.showWarningMessage(
+        `GoTune: The saved baseline belongs to ${baseline.target}; start the same target before verification.`
+      );
+      return;
+    }
+    const seconds = Math.max(
+      1,
+      Math.round(
+        (baseline.captureDurationMs ?? vscode.workspace
+          .getConfiguration('gotune')
+          .get<number>('captureCpuSeconds', 10) * 1000) / 1000
+      )
+    );
+    let endpoint: string;
+    let preferredSampleType: string | undefined = baseline.sampleType;
+    if (item.kind === 'cpu') {
+      endpoint = `profile?seconds=${seconds}`;
+      preferredSampleType = undefined;
+    } else if (item.kind === 'allocation') {
+      endpoint = `allocs?seconds=${seconds}`;
+    } else if (item.kind === 'live-memory') {
+      endpoint = 'heap?gc=1';
+    } else if (baseline.source.toLowerCase().includes('mutex')) {
+      endpoint = `mutex?seconds=${seconds}`;
+      preferredSampleType = undefined;
+    } else if (baseline.source.toLowerCase().includes('block')) {
+      endpoint = `block?seconds=${seconds}`;
+      preferredSampleType = undefined;
+    } else {
+      void vscode.window.showInformationMessage(
+        'GoTune: Repeat this waiting evidence with Capture Trace or the saved Performance Scenario.'
+      );
+      return;
+    }
+    const current = await captureManagedProfile(
+      endpoint,
+      `${fn.name} verification`,
+      preferredSampleType,
+      endpoint.includes('seconds=') ? seconds * 1000 + 15_000 : undefined,
+      false
+    );
+    if (!current) return;
+    try {
+      const comparison = compareProfiles(baseline, current);
+      const owner = currentInvestigation() ?? investigation;
+      replaceInvestigation(addFindingsToInvestigation(
+        owner,
+        findingsFromComparison(owner.id, comparison),
+        'verification-'
+      ));
+      showComparisonPanel(
+        comparison,
+        (file, line) => void openSource(file, line, heatDecoration, heatLabelDecoration)
+      );
+    } catch (error) {
+      void vscode.window.showWarningMessage(`GoTune: ${errorMessage(error)}`);
+    }
+  }
+
+  async function ensureTargetRunningForCapture(): Promise<boolean> {
+    if (runner.snapshot.status === 'running') return true;
+    await vscode.commands.executeCommand('gotune.runWithProfiler', { skipReadyPrompt: true });
+    const statusAfterStart: string = runner.snapshot.status;
+    return statusAfterStart === 'running';
+  }
+
+  async function restartTargetForVerification(
+    enableContentionProfiles = Boolean(runner.snapshot.contentionProfilesEnabled)
+  ): Promise<boolean> {
+    if (runner.snapshot.status !== 'running') {
+      return ensureTargetRunningForCapture();
+    }
+    const target = runner.snapshot.target;
+    const targetIdentity = runner.snapshot.targetIdentity;
+    if (targetIdentity?.startsWith('launch:')) {
+      const launch = goLaunchConfigurations().find((candidate) =>
+        launchTargetIdentity(
+          candidate.folder.uri.fsPath,
+          candidate.configuration.name
+        ) === targetIdentity
+      );
+      if (!launch) {
+        void vscode.window.showWarningMessage(
+          'GoTune: The launch configuration used by this baseline no longer exists.'
+        );
+        return false;
+      }
+      await runner.stop();
+      await startLaunchWithProfiler(launch, enableContentionProfiles);
+      const launchStatus: string = runner.snapshot.status;
+      return launchStatus === 'running';
+    }
+    if (!target) {
+      return true;
+    }
+    await runner.stop();
+    const execution = resolveGoExecutionConfiguration();
+    const configuration = vscode.workspace.getConfiguration('gotune');
+    await runner.start({
+      target,
+      goExecutable: execution.goExecutable,
+      buildFlags: execution.buildFlags,
+      programArguments: configuration.get<string[]>('runArguments', []),
+      environment: execution.environment,
+      enableContentionProfiles
+    });
+    const statusAfterRestart: string = runner.snapshot.status;
+    return statusAfterRestart === 'running';
+  }
+
+  async function showSessionProfile(session: ProfileSession, focusedHotspot?: Hotspot): Promise<void> {
+    if (!pprofViewer.hasProfile(session.id)) {
+      void vscode.window.showInformationMessage(
+        'GoTune：原始 Profile 只在本次 VS Code 运行中保留，请重新采集或导入后再打开官方视图。'
+      );
+      return;
+    }
+    const execution = resolveGoExecutionConfiguration();
+    try {
+      await pprofViewer.open({
+        session,
+        goExecutable: execution.goExecutable,
+        environment: execution.environment,
+        focusedFunction: focusedHotspot?.name,
+        onOpenFunction: (functionName) => {
+          const location = pprofFunctionLocation(activeSession ?? session, functionName);
+          if (!location) {
+            void vscode.window.showInformationMessage(
+              `GoTune：当前 Profile 没有 ${functionName} 的工作区源码位置。`
+            );
+            return;
+          }
+          void openSource(
+            location.file,
+            location.line,
+            heatDecoration,
+            heatLabelDecoration
+          );
+        },
+        onOpenSource: (file, line) => {
+          void openSource(file, line, heatDecoration, heatLabelDecoration);
+        },
+        onLocateCurrentFunction: async () => {
+          const fn = await functionAtEditor();
+          if (!fn) {
+            void vscode.window.showInformationMessage('GoTune：请先把光标放在 Go 函数内。');
+            return undefined;
+          }
+          const profile = activeSession ?? session;
+          const hotspot = findFunctionHotspot(fn, profile, configuredSourcePathMappings());
+          if (!hotspot) {
+            void vscode.window.showInformationMessage(
+              `GoTune：当前 Profile 没有采样到 ${fn.name}。`
+            );
+            return undefined;
+          }
+          return hotspot.name;
+        },
+        onChangeSampleType: async (sampleType, bytes) => {
+          const existing = sessions.find((candidate) =>
+            candidate.sampleType === sampleType
+            && candidate.source === session.source
+            && pprofViewer.hasProfile(candidate.id)
+          );
+          if (existing) {
+            setActive(existing);
+            return existing;
+          }
+          try {
+            const switched = parseProfile(bytes, session.name, session.source, sampleType);
+            switched.target = session.target;
+            switched.captureDurationMs = session.captureDurationMs;
+            switched.processStartedAt = session.processStartedAt;
+            switched.captureMode = session.captureMode;
+            switched.scenarioId = session.scenarioId;
+            pprofViewer.registerProfile(switched.id, bytes);
+            addSession(switched, false);
+            setActive(switched);
+            return switched;
+          } catch (error) {
+            void vscode.window.showErrorMessage(
+              `GoTune：无法切换 Profile 指标：${errorMessage(error)}`
+            );
+            return undefined;
+          }
+        }
+      });
+    } catch (error) {
+      targetOutput.appendLine(`[GoTune] Official pprof viewer failed: ${errorMessage(error)}`);
+      void vscode.window.showErrorMessage(`GoTune：无法打开官方 pprof：${errorMessage(error)}`);
+    }
+  }
+
+  function pprofFunctionLocation(
+    session: ProfileSession,
+    requestedName: string
+  ): SourceLocation | undefined {
+    const name = requestedName.replace(/\s*\(inlined\)\s*$/, '').trim();
+    const exact = session.hotspots.find((hotspot) =>
+      hotspot.name === name && hotspot.location
+    );
+    if (exact?.location) return exact.location;
+    const exactLine = session.lineMetrics.find((metric) =>
+      metric.functionName === name && isWorkspaceSourcePath(metric.file)
+    );
+    if (exactLine) return { file: exactLine.file, line: exactLine.line };
+    const suffix = session.hotspots.find((hotspot) =>
+      hotspot.location
+      && (hotspot.name.endsWith(`.${name}`) || name.endsWith(`.${hotspot.name}`))
+    );
+    return suffix?.location;
+  }
+
+  async function captureCurrentFunctionOverview(fn: GoFunctionReference): Promise<void> {
+    if (!await ensureTargetRunningForCapture()) return;
+    const investigation = ensureCodeCaptureInvestigation(activeTargetIdentity());
+    const seconds = vscode.workspace.getConfiguration('gotune').get<number>('captureCpuSeconds', 10);
+    void vscode.window.showInformationMessage(
+      `GoTune：请在接下来的 ${seconds} 秒内触发会调用 ${fn.name} 的操作。`
+    );
+    await captureManagedProfile(
+      `profile?seconds=${seconds}`,
+      '当前函数 CPU',
+      undefined,
+      seconds * 1000 + 15_000,
+      false,
+      investigation.id
+    );
+    const report = collectFunctionEvidence(
+      fn,
+      currentFunctionEvidenceSessions(),
+      activeBaselineSessionIds(),
+      configuredSourcePathMappings(),
+      activeInvestigationFindings()
+    );
+    if (report.items.length === 0 && report.findings.length === 0) {
+      void vscode.window.showWarningMessage(
+        `GoTune：采集期间没有观察到 ${fn.name}，请确认实际操作会调用这个函数。`
+      );
+      return;
+    }
+    await vscode.commands.executeCommand('gotune.showCurrentFunctionInProfile');
+  }
+
+  async function openSourceAndInspect(file: string, line: number): Promise<void> {
+    await openSource(file, line, heatDecoration, heatLabelDecoration);
+    const fn = await functionAtEditor();
+    if (fn) await vscode.commands.executeCommand('gotune.inspectCurrentFunction', fn);
   }
 
   function activeTargetIdentity(): string | undefined {
@@ -2519,6 +3267,25 @@ interface GoStructReference {
   endLine: number;
 }
 
+function isGoFunctionReference(value: unknown): value is GoFunctionReference {
+  return isGoSourceReference(value);
+}
+
+function isGoStructReference(value: unknown): value is GoStructReference {
+  return isGoSourceReference(value);
+}
+
+function isGoSourceReference(
+  value: unknown
+): value is { name: string; file: string; startLine: number; endLine: number } {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<GoFunctionReference>;
+  return typeof candidate.name === 'string'
+    && typeof candidate.file === 'string'
+    && typeof candidate.startLine === 'number'
+    && typeof candidate.endLine === 'number';
+}
+
 async function structAtEditor(): Promise<GoStructReference | undefined> {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.languageId !== 'go' || editor.document.uri.scheme !== 'file') {
@@ -2640,6 +3407,59 @@ async function openSource(
   applyProfileHeatToEditor(editor, heatDecoration, heatLabelDecoration);
 }
 
+async function showRelatedSyncCode(location: SourceLocation): Promise<void> {
+  const uri = await resolveSourceFile(location.file);
+  if (!uri) {
+    void vscode.window.showWarningMessage(
+      `GoTune: Could not map ${location.file} to this workspace.`
+    );
+    return;
+  }
+  const document = await vscode.workspace.openTextDocument(uri);
+  const lineIndex = Math.max(0, Math.min(document.lineCount - 1, location.line - 1));
+  const line = document.lineAt(lineIndex).text;
+  const symbol = syncSymbolAtLine(line);
+  if (!symbol) {
+    void vscode.window.showInformationMessage(
+      'GoTune: No channel, lock, WaitGroup, or condition symbol was found on this evidence line.'
+    );
+    return;
+  }
+  const references = await vscode.commands.executeCommand<vscode.Location[]>(
+    'vscode.executeReferenceProvider',
+    uri,
+    new vscode.Position(lineIndex, symbol.start)
+  ) ?? [];
+  const candidates = await Promise.all(references.map(async (reference) => {
+    const target = await vscode.workspace.openTextDocument(reference.uri);
+    const targetLine = target.lineAt(reference.range.start.line).text.trim();
+    return {
+      label: `$(references) ${describeSyncUsage(targetLine)}`,
+      description: `${vscode.workspace.asRelativePath(reference.uri)}:${reference.range.start.line + 1}`,
+      detail: targetLine,
+      reference
+    };
+  }));
+  if (candidates.length === 0) {
+    void vscode.window.showInformationMessage(
+      `GoTune: No Go symbol references were found for ${symbol.symbol}.`
+    );
+    return;
+  }
+  const selected = await vscode.window.showQuickPick(candidates, {
+    title: `Related synchronization code for ${symbol.symbol}`,
+    placeHolder: 'Open a sender, receiver, lock, unlock, wait, or signal reference'
+  });
+  if (!selected) return;
+  const target = await vscode.workspace.openTextDocument(selected.reference.uri);
+  const editor = await vscode.window.showTextDocument(target, { preview: true });
+  editor.selection = new vscode.Selection(
+    selected.reference.range.start,
+    selected.reference.range.start
+  );
+  editor.revealRange(selected.reference.range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+}
+
 function applyProfileHeatToEditor(
   editor: vscode.TextEditor,
   heatDecoration: vscode.TextEditorDecorationType,
@@ -2647,75 +3467,91 @@ function applyProfileHeatToEditor(
 ): void {
   const document = editor.document;
   const uri = document.uri;
-  const investigation = investigations.find((item) => item.id === activeInvestigationId);
-  const captureIds = new Set(investigation?.captureIds ?? []);
-  const evidenceSessions = investigation
-    ? sessions.filter((session) => captureIds.has(session.id))
-    : activeSession ? [activeSession] : [];
+  const evidenceSessions = activeSession ? [activeSession] : [];
   const grouped = new Map<number, Array<{
     session: ProfileSession;
     metric: ProfileSession['lineMetrics'][number];
     kind: EvidenceKind;
+    rank: number;
   }>>();
   for (const session of evidenceSessions) {
-    for (const metric of session.lineMetrics) {
-      if (!sameSource(uri.fsPath, metric.file)) continue;
+    const importantMetrics = [...session.lineMetrics]
+      .filter((metric) =>
+        metric.value > 0
+        && !isRuntimeLine(metric)
+        && isWorkspaceSourcePath(metric.file)
+        && sameSource(uri.fsPath, metric.file)
+      )
+      .sort((left, right) =>
+        Math.max(right.flat ?? 0, right.value) - Math.max(left.flat ?? 0, left.value)
+      )
+      .slice(0, 8);
+    for (const [rank, metric] of importantMetrics.entries()) {
       const line = Math.max(0, Math.min(document.lineCount - 1, metric.line - 1));
       const kind = profileEvidenceKind(session.sampleType);
       const entries = grouped.get(line) ?? [];
-      if (!entries.some((entry) => entry.kind === kind)) {
-        entries.push({ session, metric, kind });
+      if (!entries.some((entry) => entry.session.sampleType === session.sampleType)) {
+        entries.push({ session, metric, kind, rank });
         grouped.set(line, entries);
       }
     }
   }
-  const lineDecorations = [...grouped.entries()].map(([line, entries]) => {
-    const metricLine = Math.max(0, Math.min(document.lineCount - 1, line));
-    const hover = entries.flatMap(({ session, metric, kind }) => {
-      const percent = session.total ? metric.value / session.total * 100 : 0;
-      const selfPercent = session.total && metric.flat !== undefined
-        ? metric.flat / session.total * 100
-        : undefined;
-      return [
-        `### ${functionEvidenceKindLabel(kind)} · ${metric.functionName}`,
-        kind === 'live-memory'
-          ? `Produced by this allocation path and still live: **${formatValue(metric.value, session.sampleUnit)}** (${percent.toFixed(1)}% of profile)`
-          : `Self: **${metric.flat === undefined ? 'not recorded' : `${formatValue(metric.flat, session.sampleUnit)}${selfPercent === undefined ? '' : ` (${selfPercent.toFixed(1)}%)`}`}**  \nWith callees: **${formatValue(metric.value, session.sampleUnit)} (${percent.toFixed(1)}%)**`,
-        ''
-      ];
+  const lineDecorations = [...grouped.entries()]
+    .filter(([, entries]) => entries.some((entry) => entry.rank < 3))
+    .map(([line]) => {
+      const metricLine = Math.max(0, Math.min(document.lineCount - 1, line));
+      return {
+        range: document.lineAt(metricLine).range
+      };
     });
-    return {
-      range: document.lineAt(metricLine).range,
-      hoverMessage: `${hover.join('\n\n')}\n\n_With callees includes sampled work in functions called from this line. Live heap is attributed to an allocation path, not an object owner._`
-    };
-  });
   const labels = [...grouped.entries()].map(([line, entries]) => {
     const metricLine = Math.max(0, Math.min(document.lineCount - 1, line));
     const lineRange = document.lineAt(metricLine).range;
     const parts = entries.map(({ session, metric, kind }) => {
       const percent = session.total ? metric.value / session.total * 100 : 0;
       if (kind === 'cpu') {
-        const self = metric.flat === undefined || !session.total
-          ? undefined
+        const selfPercent = metric.flat === undefined || !session.total
+          ? 0
           : metric.flat / session.total * 100;
-        return self && self > 0
-          ? `CPU ${self.toFixed(1)}% self`
-          : `CPU ${percent.toFixed(1)}% incl`;
+        return metric.flat !== undefined && metric.flat > 0
+          ? `CPU 自身 ${formatValue(metric.flat, session.sampleUnit)} (${selfPercent.toFixed(1)}%)`
+          : `CPU 含下游 ${formatValue(metric.value, session.sampleUnit)} (${percent.toFixed(1)}%)`;
       }
-      if (kind === 'allocation') return `Alloc ${formatValue(metric.value, session.sampleUnit)}`;
-      if (kind === 'live-memory') return `Live path ${formatValue(metric.value, session.sampleUnit)}`;
-      if (kind === 'blocking') return `Wait ${formatValue(metric.value, session.sampleUnit)}`;
+      if (session.sampleType === 'alloc_objects') {
+        return `分配对象 ${formatValue(metric.value, session.sampleUnit)} (${percent.toFixed(1)}%)`;
+      }
+      if (kind === 'allocation') {
+        return `累计分配 ${formatValue(metric.value, session.sampleUnit)} (${percent.toFixed(1)}%)`;
+      }
+      if (session.sampleType === 'inuse_objects') {
+        return `存活对象 ${formatValue(metric.value, session.sampleUnit)} (${percent.toFixed(1)}%)`;
+      }
+      if (kind === 'live-memory') {
+        return `存活内存 ${formatValue(metric.value, session.sampleUnit)} (${percent.toFixed(1)}%)`;
+      }
+      if (kind === 'blocking') {
+        return `等待 ${formatValue(metric.value, session.sampleUnit)} (${percent.toFixed(1)}%)`;
+      }
       return `${functionEvidenceKindLabel(kind)} ${percent.toFixed(1)}%`;
     });
     const intensity = Math.max(...entries.map(({ session, metric }) =>
       session.total ? Math.min(1, metric.value / session.total) : 0
     ));
+    const isHottest = entries.some((entry) => entry.rank < 3);
+    const hover = new vscode.MarkdownString(
+      `**${parts.join(' · ')}**\n\n`
+      + '自身：直接发生在这一行的开销。包含下游：执行路径经过这一行后，连同后续调用产生的开销。'
+    );
     return {
       range: new vscode.Range(lineRange.end, lineRange.end),
+      hoverMessage: hover,
       renderOptions: {
         after: {
-          contentText: ` GoTune · ${parts.join(' · ')}`,
-          opacity: String(0.45 + 0.55 * intensity)
+          contentText: ` GoTune ${isHottest ? '🔥' : '·'} ${parts.join(' · ')}`,
+          color: new vscode.ThemeColor(
+            isHottest ? 'charts.red' : 'editorCodeLens.foreground'
+          ),
+          opacity: String(isHottest ? 1 : 0.45 + 0.35 * intensity)
         }
       }
     };
@@ -2732,6 +3568,14 @@ function configuredSourcePathMappings(): Record<string, string> {
   return vscode.workspace
     .getConfiguration('gotune')
     .get<Record<string, string>>('sourcePathMappings', {});
+}
+
+function isWorkspaceSourcePath(filename: string): boolean {
+  const mapped = applySourcePathMappings(filename, configuredSourcePathMappings());
+  return (vscode.workspace.workspaceFolders ?? []).some((folder) => {
+    const relative = path.relative(folder.uri.fsPath, mapped);
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  });
 }
 
 function profileKind(sampleType?: string): 'cpu' | 'allocation' | 'memory' | 'blocking' | 'other' {
@@ -2758,10 +3602,13 @@ function traceProfileLabel(kind: TraceProfileKind): string {
 }
 
 function latestFunctionEvidence(items: FunctionEvidenceItem[]): FunctionEvidenceItem[] {
-  const seen = new Set<EvidenceKind>();
+  const seen = new Set<string>();
   return items.filter((item) => {
-    if (seen.has(item.kind)) return false;
-    seen.add(item.kind);
+    const key = item.kind === 'allocation' || item.kind === 'live-memory'
+      ? item.sampleType
+      : item.kind;
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
 }
@@ -2774,35 +3621,62 @@ function activeBaselineSessionIds(): string[] {
   ])];
 }
 
-function functionEvidenceSummary(items: FunctionEvidenceItem[]): string {
-  const parts = latestFunctionEvidence(items).slice(0, 3).map((item) => {
-    if (item.kind === 'cpu') return `CPU ${item.selfPercent.toFixed(1)}% self`;
+function functionEvidenceSummary(
+  report: ReturnType<typeof collectFunctionEvidence>
+): string {
+  const parts = latestFunctionEvidence(report.items).slice(0, 3).map((item) => {
+    if (item.kind === 'cpu') {
+      return item.selfPercent >= 1
+        ? `CPU 自身 ${item.selfPercent.toFixed(1)}%`
+        : `CPU 含下游 ${item.cumulativePercent.toFixed(1)}%`;
+    }
+    if (item.sampleType === 'alloc_objects') {
+      return `分配对象 ${formatValue(item.cumulative, item.sampleUnit)}`;
+    }
     if (item.kind === 'allocation') {
-      return `Alloc ${formatValue(item.cumulative, item.sampleUnit)}`;
+      return `累计分配 ${formatValue(item.cumulative, item.sampleUnit)}`;
+    }
+    if (item.sampleType === 'inuse_objects') {
+      return `存活对象 ${formatValue(item.cumulative, item.sampleUnit)}`;
     }
     if (item.kind === 'live-memory') {
-      return `Live path ${formatValue(item.cumulative, item.sampleUnit)}`;
+      return `存活内存路径 ${formatValue(item.cumulative, item.sampleUnit)}`;
     }
     if (item.kind === 'blocking') {
       return `Wait ${formatValue(item.cumulative, item.sampleUnit)}`;
     }
     return `${functionEvidenceKindLabel(item.kind)} ${item.cumulativePercent.toFixed(1)}%`;
   });
+  for (const finding of report.findings) {
+    if (parts.length >= 3) break;
+    parts.push(
+      finding.kind === 'goroutine'
+        ? finding.title
+        : `${functionEvidenceKindLabel(finding.kind)} ${finding.severity}`
+    );
+  }
   return `GoTune · ${parts.join(' · ')}`;
+}
+
+function activeInvestigationFindings(): PerformanceFinding[] {
+  return investigations.find((item) => item.id === activeInvestigationId)?.findings ?? [];
+}
+
+function currentFunctionEvidenceSessions(): ProfileSession[] {
+  const ids = new Set([
+    ...(activeSession ? [activeSession.id] : []),
+    ...(baselineSessionId ? [baselineSessionId] : [])
+  ]);
+  return sessions.filter((session) => ids.has(session.id));
 }
 
 function functionEvidenceKindLabel(kind: EvidenceKind): string {
   if (kind === 'cpu') return 'CPU';
-  if (kind === 'allocation') return 'allocation';
-  if (kind === 'live-memory') return 'live heap path';
-  if (kind === 'blocking') return 'blocking';
-  if (kind === 'goroutine') return 'goroutine';
-  return 'trace';
-}
-
-function functionEvidenceDeltaText(percent?: number): string {
-  if (percent === undefined) return '';
-  return `, baseline ${percent > 0 ? '+' : ''}${percent.toFixed(1)}%`;
+  if (kind === 'allocation') return '累计分配';
+  if (kind === 'live-memory') return '当前存活内存';
+  if (kind === 'blocking') return '阻塞等待';
+  if (kind === 'goroutine') return 'Goroutine';
+  return '执行轨迹';
 }
 
 function findingFromInput(
@@ -2879,7 +3753,7 @@ function scenarioMetricFindings(
       investigationId,
       kind: 'cpu',
       severity: 'info',
-      title: 'Business metric baseline captured',
+      title: 'Scenario outcome baseline captured',
       detail: Object.entries(current.metrics)
         .map(([name, value]) => `${name}=${value.toLocaleString()}`)
         .join(' · '),
@@ -2889,23 +3763,35 @@ function scenarioMetricFindings(
   return Object.entries(current.metrics).flatMap(([name, after]) => {
     const before = baseline.metrics[name];
     if (before === undefined) return [];
-    const percent = before === 0 ? (after === 0 ? 0 : 100) : (after - before) / before * 100;
-    const lowerIsBetter = /(?:latency|p\d+|error|cpu|alloc|heap|memory|mutex|block|goroutine)/i.test(name);
-    const improvement = lowerIsBetter ? -percent : percent;
+    const delta = after - before;
+    const percent = before === 0 ? undefined : delta / Math.abs(before) * 100;
+    const lowerIsBetter = /(?:latency|p\d+|error|cpu|alloc|heap|memory|mutex|block|goroutine|gc)/i.test(name);
+    const directionalChange = percent ?? (delta === 0 ? 0 : Math.sign(delta) * 100);
+    const improvement = lowerIsBetter ? -directionalChange : directionalChange;
     return [{
       id: `scenario-metric-${current.id}-${name}`,
       investigationId,
-      kind: 'cpu' as const,
+      kind: scenarioMetricEvidenceKind(name),
       severity: improvement >= 5
         ? 'verified' as const
         : improvement <= -5 ? 'suspicious' as const : 'info' as const,
       title: improvement >= 5
         ? `${name} improved`
         : improvement <= -5 ? `${name} regressed` : `${name} is stable`,
-      detail: `${before.toLocaleString()} → ${after.toLocaleString()} (${percent > 0 ? '+' : ''}${percent.toFixed(1)}%)`,
+      detail: `${before.toLocaleString()} → ${after.toLocaleString()}${percent === undefined
+        ? ''
+        : ` (${percent > 0 ? '+' : ''}${percent.toFixed(1)}%)`}`,
       createdAt: current.finishedAt
     }];
   });
+}
+
+function scenarioMetricEvidenceKind(name: string): EvidenceKind {
+  if (/goroutine/i.test(name)) return 'goroutine';
+  if (/mutex|block|wait/i.test(name)) return 'blocking';
+  if (/live|heap|memory/i.test(name)) return 'live-memory';
+  if (/alloc/i.test(name)) return 'allocation';
+  return 'cpu';
 }
 
 function appendScenarioRun(
@@ -2941,6 +3827,17 @@ function defaultScenarioCaptures(problem: ProblemKind): EvidenceKind[] {
 function positiveOrZeroNumber(value: string): string | undefined {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? undefined : 'Enter a number greater than or equal to 0';
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
 }
 
 function positiveNumber(value: string): string | undefined {

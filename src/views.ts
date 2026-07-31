@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { isRuntimeHotspot } from './classify';
 import {
   Hotspot,
   Investigation,
@@ -28,66 +29,52 @@ export class RunningItem extends vscode.TreeItem {
 
 export function runningItems(
   snapshot: RunnerSnapshot,
-  memoryGrowthSamples = 0,
-  advancedToolsVisible = false
-): RunningItem[] {
+  activeSession?: ProfileSession,
+  baselineSessionId?: string,
+  isApplicationSource: (filename: string) => boolean = () => true
+): vscode.TreeItem[] {
+  const evidence = activeSession
+    ? [
+      new SessionItem(
+        activeSession,
+        activeSession.id === baselineSessionId ? 'baseline' : 'current'
+      ),
+      ...activeSession.hotspots
+        .filter((hotspot) =>
+          hotspot.location
+          && !isRuntimeHotspot(hotspot)
+          && isApplicationSource(hotspot.location.file)
+        )
+        .slice(0, 12)
+        .map((hotspot) => new HotspotItem(hotspot, activeSession))
+    ]
+    : [];
   if (snapshot.status === 'idle') {
     return [
-      new RunningItem('Investigate a performance problem', 'choose the symptom; GoTune selects evidence', 'search', 'gotune.startInvestigation'),
-      new RunningItem('Run current Go main with profiler', 'use the active package main when possible', 'run', 'gotune.runWithProfiler'),
-      new RunningItem('Run launch.json with profiler', 'reuse project environment, arguments, and debug setup', 'debug-start', 'gotune.runLaunchWithProfiler'),
-      new RunningItem('Connect to a pprof server', 'for an already running Go process', 'plug', 'gotune.fetchProfile'),
-      new RunningItem('Import an existing profile', 'open a .pprof or protobuf file', 'folder-opened', 'gotune.importProfile')
+      new RunningItem('分析当前函数', '在 pprof 中定位并查看调用关系', 'symbol-method', 'gotune.analyzeCurrentFunction'),
+      new RunningItem('启动当前 Go main', '自动注入 pprof 并运行当前 main 包', 'run', 'gotune.runWithProfiler'),
+      new RunningItem('连接 pprof 服务', '分析已经运行的 Go 进程', 'plug', 'gotune.fetchProfile'),
+      new RunningItem('导入 pprof 文件', '打开已有 CPU 或 Heap Profile', 'folder-opened', 'gotune.importProfile'),
+      ...evidence
     ];
   }
   if (snapshot.status === 'starting') {
     return [
-      new RunningItem('Starting profiler target…', snapshot.target?.importPath, 'loading~spin'),
-      new RunningItem('Show target output', undefined, 'output', 'gotune.showTargetOutput')
+      new RunningItem('正在启动分析目标…', snapshot.target?.importPath, 'loading~spin'),
+      new RunningItem('查看目标输出', undefined, 'output', 'gotune.showTargetOutput')
     ];
   }
   if (snapshot.status === 'stopping') {
-    return [new RunningItem('Stopping profiler target…', snapshot.target?.importPath, 'loading~spin')];
+    return [new RunningItem('正在停止分析目标…', snapshot.target?.importPath, 'loading~spin')];
   }
-  const primary = [
-    new RunningItem(snapshot.target?.importPath ?? 'Go target', `PID ${snapshot.pid ?? '—'}`, 'vm-running'),
-    new RunningItem('CPU high or operation slow', 'capture while reproducing the slowdown', 'flame', 'gotune.captureCpu'),
-    new RunningItem(
-      'Memory keeps growing',
-      memoryGrowthSamples === 0
-        ? 'Step 1/3: capture GC baseline'
-        : `Step ${memoryGrowthSamples + 1}/3: repeat workload and capture`,
-      'graph',
-      'gotune.checkMemoryGrowth'
-    ),
-    new RunningItem('Too many allocations or GC pressure', 'find code creating the most temporary objects', 'symbol-array', 'gotune.captureAllocations'),
-    new RunningItem('Request stuck or goroutines blocked', 'sample repeated stacks and check progress', 'list-tree', 'gotune.monitorGoroutines'),
-    new RunningItem(
-      advancedToolsVisible ? 'Hide advanced diagnostics' : 'Show advanced diagnostics',
-      advancedToolsVisible ? 'trace · goroutines · contention' : 'Only needed for blocking or scheduler problems',
-      advancedToolsVisible ? 'chevron-up' : 'chevron-down',
-      'gotune.toggleAdvancedTools'
-    )
-  ];
-  const advanced = advancedToolsVisible ? [
-    new RunningItem('Live performance overview', 'memory · goroutines · GC', 'dashboard', 'gotune.showRuntimeOverview'),
-    new RunningItem('Raw live memory snapshot', 'GC first · inuse_space', 'database', 'gotune.captureHeap'),
-    new RunningItem('Trace execution time', '5s scheduler and blocking timeline', 'history', 'gotune.captureTrace'),
-    new RunningItem('Snapshot goroutines', 'current states and stacks', 'list-flat', 'gotune.captureGoroutines'),
-    new RunningItem(
-      'Contention profiling',
-      snapshot.contentionProfilesEnabled ? 'Enabled for this run' : 'Disabled for this run',
-      snapshot.contentionProfilesEnabled ? 'check' : 'circle-large-outline',
-      'gotune.toggleContentionProfiles'
-    ),
-    new RunningItem('Capture Mutex', 'sampling must be enabled', 'lock', 'gotune.captureMutex'),
-    new RunningItem('Capture Block', 'sampling must be enabled', 'debug-pause', 'gotune.captureBlock')
-  ] : [];
   return [
-    ...primary,
-    ...advanced,
-    new RunningItem('Show target output', undefined, 'output', 'gotune.showTargetOutput'),
-    new RunningItem('Stop target', undefined, 'debug-stop', 'gotune.stopProfilerTarget')
+    new RunningItem(snapshot.target?.importPath ?? 'Go 目标', `运行中 · PID ${snapshot.pid ?? '—'}`, 'vm-running'),
+    new RunningItem('分析当前函数', '在 pprof 中定位并查看调用关系', 'symbol-method', 'gotune.analyzeCurrentFunction'),
+    new RunningItem('采集 CPU', '采集期间请触发需要分析的业务操作', 'flame', 'gotune.captureCpu'),
+    new RunningItem('采集当前存活内存', '强制 GC 后查看仍然存活的分配路径', 'database', 'gotune.captureHeap'),
+    ...evidence,
+    new RunningItem('查看目标输出', undefined, 'output', 'gotune.showTargetOutput'),
+    new RunningItem('停止目标', undefined, 'debug-stop', 'gotune.stopProfilerTarget')
   ];
 }
 
@@ -98,18 +85,18 @@ export class SessionItem extends vscode.TreeItem {
   ) {
     super(session.name, vscode.TreeItemCollapsibleState.None);
     this.contextValue = 'gotuneSession';
-    const stateLabel = state === 'baseline' ? 'Baseline · ' : state === 'current' ? 'Current · ' : '';
-    this.description = `${stateLabel}${session.sampleType} · ${formatValue(session.total, session.sampleUnit)}`;
+    const stateLabel = state === 'baseline' ? '基线 · ' : state === 'current' ? '当前 · ' : '';
+    this.description = `${stateLabel}${sampleTypeLabel(session.sampleType)} · ${formatValue(session.total, session.sampleUnit)}`;
     this.tooltip = [
-      `${stateLabel || 'Session · '}${session.source}`,
-      session.target ? `Target: ${session.target}` : undefined,
-      session.captureDurationMs ? `Capture: ${session.captureDurationMs / 1000}s` : undefined,
-      `Captured ${new Date(session.importedAt).toLocaleString()}`
+      `${stateLabel || '性能证据 · '}${session.source}`,
+      session.target ? `目标：${session.target}` : undefined,
+      session.captureDurationMs ? `采集时长：${session.captureDurationMs / 1000}s` : undefined,
+      `采集时间：${new Date(session.importedAt).toLocaleString()}`
     ].filter(Boolean).join('\n');
     this.iconPath = new vscode.ThemeIcon(
       state === 'baseline' ? 'target' : state === 'current' ? 'arrow-right' : 'pulse'
     );
-    this.command = { command: 'gotune.showProfile', title: 'Show Profile', arguments: [this] };
+    this.command = { command: 'gotune.showProfile', title: '查看性能证据', arguments: [this] };
   }
 }
 
@@ -118,17 +105,26 @@ export class HotspotItem extends vscode.TreeItem {
     super(hotspot.name, vscode.TreeItemCollapsibleState.None);
     this.contextValue = 'gotuneHotspot';
     const percent = session.total === 0 ? 0 : hotspot.cumulative / session.total * 100;
-    this.description = `${percent.toFixed(1)}% cumulative`;
+    this.description = `${percent.toFixed(1)}% 包含下游`;
     this.tooltip = [
-      `Flat: ${formatValue(hotspot.flat, session.sampleUnit)}`,
-      `Cumulative: ${formatValue(hotspot.cumulative, session.sampleUnit)}`,
-      hotspot.location ? `${hotspot.location.file}:${hotspot.location.line}` : 'No source location'
+      `自身：${formatValue(hotspot.flat, session.sampleUnit)}`,
+      `包含下游：${formatValue(hotspot.cumulative, session.sampleUnit)}`,
+      hotspot.location ? `${hotspot.location.file}:${hotspot.location.line}` : '没有源码位置'
     ].join('\n');
     this.iconPath = new vscode.ThemeIcon(hotspot.location ? 'flame' : 'symbol-method');
     if (hotspot.location) {
-      this.command = { command: 'gotune.showSource', title: 'Open Source', arguments: [this] };
+      this.command = { command: 'gotune.showSource', title: '打开源码', arguments: [this] };
     }
   }
+}
+
+function sampleTypeLabel(sampleType: string): string {
+  if (sampleType === 'cpu') return 'CPU';
+  if (sampleType === 'inuse_space') return '存活内存';
+  if (sampleType === 'inuse_objects') return '存活对象';
+  if (sampleType === 'alloc_space') return '累计分配';
+  if (sampleType === 'alloc_objects') return '分配对象';
+  return sampleType;
 }
 
 export class InvestigationFindingItem extends vscode.TreeItem {
@@ -224,6 +220,7 @@ export class ScenarioItem extends vscode.TreeItem {
       `Target: ${scenario.target ?? 'current target'}`,
       scenario.launchConfiguration ? `Launch: ${scenario.launchConfiguration}` : undefined,
       `Workload: ${scenario.workloadKind}${scenario.workload ? ` · ${scenario.workload}` : ''}`,
+      scenario.workloadTaskSource ? `Task source: ${scenario.workloadTaskSource}` : undefined,
       `Warmup: ${scenario.warmupSeconds}s`,
       scenario.workloadKind === 'benchmark'
         ? `Benchmark: count=${scenario.benchmarkCount ?? 5} · benchtime=${scenario.benchmarkTime ?? '1s'}`

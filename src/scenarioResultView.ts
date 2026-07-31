@@ -36,15 +36,38 @@ function metricRow(name: string, before?: number, after?: number): string {
   const percent = before === undefined || after === undefined || before === 0
     ? undefined
     : (after - before) / before * 100;
-  const lowerIsBetter = /(?:latency|p\\d+|error|cpu|alloc|heap|memory|mutex|block|goroutine)/i.test(name);
+  const lowerIsBetter = /(?:latency|p\\d+|error|cpu|alloc|heap|memory|mutex|block|goroutine|gc)/i.test(name);
   const improved = percent !== undefined && (lowerIsBetter ? percent < 0 : percent > 0);
   const regressed = percent !== undefined && (lowerIsBetter ? percent > 0 : percent < 0);
-  return `<tr><td>${escapeHtml(name)}</td><td>${format(before)}</td><td>${format(after)}</td>
+  return `<tr><td>${escapeHtml(metricLabel(name))}</td><td>${format(name, before)}</td><td>${format(name, after)}</td>
 <td class="${improved ? 'better' : regressed ? 'worse' : ''}">${percent === undefined ? '—' : `${percent > 0 ? '+' : ''}${percent.toFixed(1)}%`}</td></tr>`;
 }
 
-function format(value?: number): string {
-  return value === undefined ? '—' : value.toLocaleString(undefined, { maximumFractionDigits: 3 });
+function format(name: string, value?: number): string {
+  if (value === undefined) return '—';
+  if (name.endsWith('_bytes') || name.endsWith('_bytes_per_s')) {
+    const absolute = Math.abs(value);
+    const suffix = name.endsWith('_per_s') ? '/s' : '';
+    if (absolute >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GiB${suffix}`;
+    if (absolute >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(2)} MiB${suffix}`;
+    if (absolute >= 1024) return `${(value / 1024).toFixed(2)} KiB${suffix}`;
+    return `${value.toFixed(0)} B${suffix}`;
+  }
+  if (name.endsWith('_ns')) {
+    if (Math.abs(value) >= 1e9) return `${(value / 1e9).toFixed(2)} s`;
+    if (Math.abs(value) >= 1e6) return `${(value / 1e6).toFixed(2)} ms`;
+    if (Math.abs(value) >= 1e3) return `${(value / 1e3).toFixed(2)} µs`;
+    return `${value.toFixed(0)} ns`;
+  }
+  return value.toLocaleString(undefined, { maximumFractionDigits: 3 });
+}
+
+function metricLabel(name: string): string {
+  return name
+    .replace(/_bytes_per_s$/, ' rate')
+    .replace(/_(?:bytes|ns)$/, '')
+    .replaceAll('_', ' ')
+    .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
 function shortCommit(commit?: string): string {

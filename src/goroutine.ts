@@ -20,6 +20,7 @@ export interface GoroutineGroup {
   waitDetail?: string;
   count: number;
   countDelta: number;
+  countGrowth: number;
   topFunction: string;
   frames: GoroutineFrame[];
   representative: string;
@@ -34,19 +35,28 @@ export interface GoroutineSnapshot {
   stateCount: number;
   suspiciousCount: number;
   totalDelta: number;
+  totalGrowth: number;
   groups: GoroutineGroup[];
+}
+
+export interface GoroutineAssessment {
+  kind: 'normal-io' | 'normal' | 'needs-more-samples' | 'possible-stall' | 'growth';
+  title: string;
+  detail: string;
 }
 
 interface TrackedGroup {
   stableCaptures: number;
   generation: number;
   count: number;
+  initialCount: number;
 }
 
 export class GoroutineTracker {
   private generation = 0;
   private tracked = new Map<string, TrackedGroup>();
   private previousTotal = 0;
+  private baselineTotal = 0;
 
   capture(text: string): GoroutineSnapshot {
     this.generation++;
@@ -65,21 +75,29 @@ export class GoroutineTracker {
       const countDelta = previous?.generation === this.generation - 1
         ? entries.length - previous.count
         : 0;
-      this.tracked.set(signature, { stableCaptures, generation: this.generation, count: entries.length });
+      const initialCount = previous?.initialCount ?? entries.length;
+      const countGrowth = entries.length - initialCount;
+      this.tracked.set(signature, {
+        stableCaptures,
+        generation: this.generation,
+        count: entries.length,
+        initialCount
+      });
       const first = entries[0];
-      const severity = classifySeverity(first.state, stableCaptures, entries.length, countDelta);
+      const severity = classifySeverity(first.state, stableCaptures, entries.length, countGrowth);
       return {
         signature,
         state: first.state,
         waitDetail: first.waitDetail,
         count: entries.length,
         countDelta,
+        countGrowth,
         topFunction: first.frames[0]?.functionName ?? 'unknown',
         frames: first.frames,
         representative: first.raw,
         stableCaptures,
         severity,
-        explanation: severityExplanation(first.state, severity, stableCaptures, entries.length, countDelta)
+        explanation: severityExplanation(first.state, severity, stableCaptures, entries.length, countGrowth)
       } satisfies GoroutineGroup;
     });
 
@@ -89,6 +107,8 @@ export class GoroutineTracker {
       || left.state.localeCompare(right.state)
     );
     const totalDelta = this.generation === 1 ? 0 : goroutines.length - this.previousTotal;
+    if (this.generation === 1) this.baselineTotal = goroutines.length;
+    const totalGrowth = goroutines.length - this.baselineTotal;
     this.previousTotal = goroutines.length;
     return {
       capturedAt: Date.now(),
@@ -98,6 +118,7 @@ export class GoroutineTracker {
         .filter((group) => group.severity === 'suspicious')
         .reduce((sum, group) => sum + group.count, 0),
       totalDelta,
+      totalGrowth,
       groups
     };
   }
@@ -106,6 +127,7 @@ export class GoroutineTracker {
     this.generation = 0;
     this.tracked.clear();
     this.previousTotal = 0;
+    this.baselineTotal = 0;
   }
 }
 
@@ -125,6 +147,48 @@ export function parseGoroutineDump(text: string): GoroutineInfo[] {
       raw: `${match[0]}\n${body}`
     };
   });
+}
+
+export function assessGoroutineSnapshot(snapshot: GoroutineSnapshot): GoroutineAssessment {
+  const suspicious = snapshot.groups.filter((group) => group.severity === 'suspicious');
+  const growing = suspicious.filter((group) => group.countGrowth > 0);
+  if (growing.length > 0) {
+    return {
+      kind: 'growth',
+      title: 'Goroutine growth on stable blocking stacks',
+      detail: `${growing.reduce((sum, group) => sum + group.countGrowth, 0)} additional goroutine(s) appeared on unchanged synchronization stacks. This is leak or stalled-operation evidence, not proof of a deadlock.`
+    };
+  }
+  if (suspicious.length > 0) {
+    return {
+      kind: 'possible-stall',
+      title: 'Possible logical stall',
+      detail: `${snapshot.suspiciousCount} goroutine(s) remained on unchanged channel or lock stacks. Confirm that the business operation stopped making progress before calling this a deadlock.`
+    };
+  }
+  if (snapshot.groups.some((group) => group.severity === 'watch')) {
+    return {
+      kind: 'needs-more-samples',
+      title: 'Transient wait or early contention signal',
+      detail: 'Some synchronization stacks need more repeated samples. The current evidence does not establish a stall.'
+    };
+  }
+  const waiting = snapshot.groups.reduce((sum, group) => sum + group.count, 0);
+  const ioWaiting = snapshot.groups
+    .filter((group) => /IO wait/i.test(group.state))
+    .reduce((sum, group) => sum + group.count, 0);
+  if (waiting > 0 && ioWaiting / waiting >= 0.5) {
+    return {
+      kind: 'normal-io',
+      title: 'Mostly normal I/O waiting',
+      detail: `${ioWaiting} of ${waiting} sampled goroutines are waiting for network or file I/O, with no stable suspicious synchronization stack.`
+    };
+  }
+  return {
+    kind: 'normal',
+    title: 'No stable blocking pattern found',
+    detail: 'Repeated samples did not identify a growing or unchanged suspicious synchronization stack.'
+  };
 }
 
 function parseFrames(body: string): GoroutineFrame[] {

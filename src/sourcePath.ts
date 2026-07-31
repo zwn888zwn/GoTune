@@ -13,10 +13,11 @@ export function applySourcePathMappings(
 }
 
 export function sourcePathsMatch(
-  left: string,
-  right: string,
+  left: string | undefined,
+  right: string | undefined,
   mappings: Record<string, string> = {}
 ): boolean {
+  if (!left || !right) return false;
   const a = normalize(applySourcePathMappings(left, mappings));
   const b = normalize(applySourcePathMappings(right, mappings));
   return a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);

@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
 import { isRuntimeFunction, isRuntimeHotspot, isRuntimeLine } from './classify';
-import { GoroutineSnapshot } from './goroutine';
-import { buildProfileInsights, profileMeaning } from './insights';
+import { assessGoroutineSnapshot, GoroutineSnapshot } from './goroutine';
+import { profileMeaning } from './insights';
 import { MemoryTrend } from './memoryTrend';
-import { CallNode, Hotspot, ProfileComparison, ProfileSession } from './model';
+import { Hotspot, ProfileComparison, ProfileSession } from './model';
+import { ProfileGraph } from './profileGraph';
 
 export type ProfileAction = 'escape' | 'baseline' | 'compare' | 'recapture';
 
@@ -30,32 +31,6 @@ function escapeHtml(value: string): string {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
-}
-
-function callRows(nodes: CallNode[], session: ProfileSession, depth = 0): string {
-  return nodes.slice(0, depth === 0 ? 30 : 12).map((node) => {
-    const percent = session.total === 0 ? 0 : node.value / session.total * 100;
-    const location = node.location ? `${node.location.file}:${node.location.line}` : '';
-    return `<tr class="source-row" data-file="${escapeHtml(node.location?.file ?? '')}" data-line="${node.location?.line ?? 0}">
-      <td style="padding-left:${depth * 18 + 8}px">${escapeHtml(node.name)}</td>
-      <td>${formatValue(node.value, session.sampleUnit)}</td>
-      <td>${percent.toFixed(1)}%</td>
-      <td>${escapeHtml(location)}</td>
-    </tr>${callRows(node.children, session, depth + 1)}`;
-  }).join('');
-}
-
-function flameNodes(nodes: CallNode[], total: number, depth = 0): string {
-  if (depth > 12) return '';
-  return nodes.map((node) => {
-    const width = total === 0 ? 0 : node.value / total * 100;
-    if (width < 0.25) return '';
-    return `<div class="flame" style="width:${width}%" title="${escapeHtml(node.name)} · ${width.toFixed(1)}%"
-      data-file="${escapeHtml(node.location?.file ?? '')}" data-line="${node.location?.line ?? 0}">
-      <span>${escapeHtml(node.name)}</span>
-      <div class="children">${flameNodes(node.children, node.value, depth + 1)}</div>
-    </div>`;
-  }).join('');
 }
 
 export function showRuntimeOverviewPanel(
@@ -162,11 +137,14 @@ export function showProfilePanel(
   onOpenSource: (file: string, line: number) => void,
   focusedHotspot?: Hotspot,
   onAction?: (action: ProfileAction, hotspot: Hotspot | undefined) => void,
-  baselineState: 'none' | 'current' | 'available' = 'none'
+  baselineState: 'none' | 'current' | 'available' = 'none',
+  graph?: ProfileGraph
 ): void {
   const panel = vscode.window.createWebviewPanel(
     'gotune.profile',
-    `GoTune: ${session.name}`,
+    focusedHotspot
+      ? `GoTune: ${profileMetricLabel(session.sampleType)} · ${displayShortName(focusedHotspot.name)}`
+      : `GoTune: ${session.name}`,
     vscode.ViewColumn.Beside,
     { enableScripts: true, retainContextWhenHidden: true }
   );
@@ -176,12 +154,15 @@ export function showProfilePanel(
   const actionHotspot = focusedHotspot
     ?? session.hotspots.find((hotspot) => hotspot.location && !isRuntimeHotspot(hotspot))
     ?? hottest;
-  const insights = buildProfileInsights(session);
-  const kind = /^alloc_/.test(session.sampleType)
-    ? 'allocation'
-    : /^inuse_/.test(session.sampleType)
-      ? 'memory'
-      : /delay|contentions|mutex|block/i.test(session.sampleType) ? 'blocking' : 'cpu';
+  const detailHotspot = focusedHotspot ?? actionHotspot;
+  const graphDetails = graph?.nodes.map((node) => ({
+    name: node.name,
+    self: formatValue(node.flat, session.sampleUnit),
+    selfPercent: session.total === 0 ? '0.0' : (node.flat / session.total * 100).toFixed(1),
+    cumulative: formatValue(node.cumulative, session.sampleUnit),
+    cumulativePercent: session.total === 0 ? '0.0' : (node.cumulative / session.total * 100).toFixed(1),
+    source: node.location ? `${node.location.file}:${node.location.line}` : '没有源码位置'
+  })) ?? [];
   panel.webview.html = `<!doctype html>
 <html>
 <head>
@@ -195,55 +176,53 @@ export function showProfilePanel(
     .notice{border-left:3px solid var(--vscode-charts-blue);background:var(--vscode-textBlockQuote-background);padding:10px 12px;color:var(--vscode-descriptionForeground)}
     .meaning{border-left:3px solid var(--vscode-charts-blue);background:var(--vscode-textBlockQuote-background);padding:10px 12px;margin-bottom:10px}
     .next-step{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 12px;margin-bottom:12px;border:1px solid var(--vscode-panel-border);border-radius:4px}.next-step strong{margin-right:4px}.next-step button{padding:6px 10px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:0}.next-step button.secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}
-    .insights{display:grid;gap:8px;margin-bottom:16px}.insight{padding:10px 12px;border:1px solid var(--vscode-panel-border);border-radius:4px}.insight[data-file]:not([data-file=""]){cursor:pointer}.insight:hover{background:var(--vscode-list-hoverBackground)}.insight strong{display:block;margin-bottom:4px}.insight span{color:var(--vscode-descriptionForeground)}
+    .focus{border-left:3px solid var(--vscode-focusBorder);background:var(--vscode-textBlockQuote-background);padding:10px 12px;margin-bottom:12px}
+    .selected-detail{display:grid;grid-template-columns:minmax(220px,2fr) repeat(2,minmax(130px,1fr));gap:8px;padding:10px 12px;margin-bottom:12px;border:1px solid var(--vscode-focusBorder);border-radius:4px}.selected-detail strong{display:block}.selected-detail span{font-size:12px;color:var(--vscode-descriptionForeground)}
     .tabs{display:flex;gap:8px;margin-bottom:12px}.tabs button{color:inherit;background:var(--vscode-button-secondaryBackground);border:0;padding:6px 12px}
     .tabs button.active{background:var(--vscode-button-background);color:var(--vscode-button-foreground)}
     section{display:none}section.active{display:block}table{border-collapse:collapse;width:100%}th,td{padding:6px 8px;border-bottom:1px solid var(--vscode-panel-border);text-align:left}
     .source-row[data-file]:not([data-file=""]){cursor:pointer}.source-row:hover{background:var(--vscode-list-hoverBackground)}.source-row.focused{outline:1px solid var(--vscode-focusBorder);background:var(--vscode-list-activeSelectionBackground)}
     .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:8px}.toolbar input{width:min(420px,70vw);padding:6px 8px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border)}
     .toolbar button{padding:6px 10px;color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:0}.hint{color:var(--vscode-descriptionForeground);font-size:12px}
-    .flame-root{display:flex;align-items:flex-end;min-height:300px}.flame{box-sizing:border-box;display:flex;flex-direction:column-reverse;min-height:25px;border:1px solid var(--vscode-editor-background);background:var(--vscode-charts-orange);overflow:hidden;cursor:pointer}
-    .flame:nth-child(3n+2){background:var(--vscode-charts-yellow)}.flame:nth-child(3n){background:var(--vscode-charts-red)}
-    .flame>span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:4px;color:var(--vscode-editor-background)}
-    .children{display:flex;align-items:flex-end;width:100%}
+    .graph-wrap{height:calc(100vh - 360px);min-height:420px;overflow:auto;border:1px solid var(--vscode-panel-border);background:var(--vscode-editor-background)}
+    .profile-graph{min-width:100%;height:auto}.profile-graph g.node{cursor:pointer}.profile-graph g.node:hover polygon,.profile-graph g.node:hover path,.profile-graph g.node.selected polygon,.profile-graph g.node.selected path{stroke:var(--vscode-focusBorder);stroke-width:4}
   </style>
 </head>
 <body>
   <h1>${escapeHtml(session.name)}</h1>
   <div class="summary">${escapeHtml(session.sampleType)} · ${formatValue(session.total, session.sampleUnit)} · ${escapeHtml(session.source)}</div>
   <div class="cards">
-    <div class="card"><strong>${formatValue(session.total, session.sampleUnit)}</strong><span>Total ${escapeHtml(session.sampleType)}</span></div>
-    <div class="card"><strong>${session.hotspots.length}</strong><span>Functions sampled</span></div>
-    <div class="card"><strong>${mappedHotspots}</strong><span>Functions mapped to source</span></div>
-    <div class="card"><strong>${escapeHtml(hottest ? displayShortName(hottest.name) : '—')}</strong><span>Hottest function</span></div>
+    <div class="card"><strong>${formatValue(session.total, session.sampleUnit)}</strong><span>${escapeHtml(profileMetricLabel(session.sampleType))}总量</span></div>
+    <div class="card"><strong>${session.hotspots.length}</strong><span>采样到的函数</span></div>
+    <div class="card"><strong>${mappedHotspots}</strong><span>可跳转源码的函数</span></div>
+    <div class="card"><strong>${escapeHtml(hottest ? displayShortName(hottest.name) : '—')}</strong><span>全局最高函数</span></div>
   </div>
+  ${focusedHotspot ? `<div class="focus"><b>已定位当前函数：</b>${escapeHtml(focusedHotspot.name)}。调用图只展示它附近的调用方和下游；点击任意节点会回到源码并打开该函数详情。</div>` : ''}
   <div class="meaning"><b>这个 Profile 表示：</b>${escapeHtml(profileMeaning(session.sampleType))}</div>
+  ${detailHotspot ? `<div class="selected-detail">
+    <div><strong id="detail-name">${escapeHtml(detailHotspot.name)}</strong><span id="detail-source">${escapeHtml(detailHotspot.location ? `${detailHotspot.location.file}:${detailHotspot.location.line}` : '没有源码位置')}</span></div>
+    <div><strong id="detail-self">${formatValue(detailHotspot.flat, session.sampleUnit)}</strong><span id="detail-self-label">自身 · ${(session.total === 0 ? 0 : detailHotspot.flat / session.total * 100).toFixed(1)}%</span></div>
+    <div><strong id="detail-cumulative">${formatValue(detailHotspot.cumulative, session.sampleUnit)}</strong><span id="detail-cumulative-label">包含下游 · ${(session.total === 0 ? 0 : detailHotspot.cumulative / session.total * 100).toFixed(1)}%</span></div>
+  </div>` : ''}
+  ${!graph && session.total !== 0
+    ? '<div class="notice">Graphviz 不可用，已回退到瓶颈排行和源码证据。安装 dot 后可查看调用图。</div>'
+    : ''}
   <div class="next-step">
-    <strong>下一步：</strong>
-    ${kind === 'allocation' ? '<button data-action="escape">分析热点为什么逃逸</button>' : ''}
-    ${kind === 'memory' ? '<button data-action="recapture">检查三轮内存增长</button>' : ''}
-    ${kind === 'cpu' || kind === 'blocking' ? '<button data-tab-target="calls">查看调用路径</button>' : ''}
-    ${kind !== 'allocation' && baselineState === 'none' ? '<button class="secondary" data-action="baseline">设为修改前基线</button>' : ''}
-    ${kind !== 'allocation' && baselineState === 'available' ? '<button data-action="compare">与基线比较</button>' : ''}
-    ${kind !== 'memory' ? '<button class="secondary" data-action="recapture">修改后重新采集</button>' : ''}
+    <strong>对比优化效果：</strong>
+    ${baselineState === 'none' ? '<button class="secondary" data-action="baseline">设为修改前基线</button>' : ''}
+    ${baselineState === 'available' ? '<button data-action="compare">与基线比较</button>' : ''}
+    <button class="secondary" data-action="recapture">重新采集</button>
   </div>
-  <div class="insights">
-    ${insights.map((insight) => `<div class="insight" data-file="${escapeHtml(insight.location?.file ?? '')}" data-line="${insight.location?.line ?? 0}">
-      <strong>${insight.kind === 'warning' ? '⚠ ' : ''}${escapeHtml(insight.title)}</strong>
-      <span>${escapeHtml(insight.detail)}${insight.location ? ' · 点击打开源码' : ''}</span>
-    </div>`).join('')}
-  </div>
-  <div class="tabs"><button class="active" data-tab="top">Top</button><button data-tab="flame">Flame Graph</button><button data-tab="calls">Call Tree</button><button data-tab="source">Source</button></div>
-  <section id="top" class="active"><div class="toolbar"><input id="top-filter" placeholder="Filter functions or source paths"><label class="hint"><input id="hide-runtime" type="checkbox" checked> Hide Go runtime</label></div><table><thead><tr><th>Function</th><th>Flat</th><th>Cumulative</th><th>Source</th></tr></thead><tbody>
+  <div class="tabs">${graph ? '<button class="active" data-tab="graph">调用图</button>' : ''}<button class="${graph ? '' : 'active'}" data-tab="top">函数排行</button><button data-tab="source">源码行</button></div>
+  ${graph ? `<section id="graph" class="active"><div class="toolbar"><span class="hint">自身 = 直接发生在函数内；包含下游 = 连同它调用的函数。点击节点跳到源码并查看详情。</span></div><div class="graph-wrap">${graph.svg}</div></section>` : ''}
+  <section id="top" class="${graph ? '' : 'active'}"><div class="toolbar"><input id="top-filter" placeholder="筛选函数或源码路径"><label class="hint"><input id="hide-runtime" type="checkbox" checked> 隐藏 Go 运行时</label></div><table><thead><tr><th>函数</th><th>自身</th><th>包含下游</th><th>源码</th></tr></thead><tbody>
     ${session.hotspots.length === 0
-      ? `<tr><td colspan="4"><div class="notice">No ${escapeHtml(session.sampleType)} samples were recorded. For CPU profiles, generate workload while the capture is running.</div></td></tr>`
-      : session.hotspots.slice(0, 100).map((hotspot) => `<tr class="source-row top-row${focusedHotspot?.id === hotspot.id ? ' focused' : ''}" data-runtime="${isRuntimeHotspot(hotspot)}" data-filter="${escapeHtml(`${hotspot.name} ${hotspot.location?.file ?? ''}`.toLowerCase())}" data-file="${escapeHtml(hotspot.location?.file ?? '')}" data-line="${hotspot.location?.line ?? 0}">
+      ? `<tr><td colspan="4"><div class="notice">本次没有采集到 ${escapeHtml(profileMetricLabel(session.sampleType))} 样本。采集 CPU 时需要在采集期间实际触发业务操作。</div></td></tr>`
+      : session.hotspots.slice(0, 100).map((hotspot) => `<tr class="source-row top-row${focusedHotspot?.id === hotspot.id ? ' focused' : ''}" data-runtime="${isRuntimeHotspot(hotspot)}" data-filter="${escapeHtml(`${hotspot.name} ${hotspot.location?.file ?? ''}`.toLowerCase())}" data-file="${escapeHtml(hotspot.location?.file ?? '')}" data-line="${hotspot.location?.line ?? 0}" data-name="${escapeHtml(hotspot.name)}" data-self="${escapeHtml(formatValue(hotspot.flat, session.sampleUnit))}" data-self-percent="${(session.total === 0 ? 0 : hotspot.flat / session.total * 100).toFixed(1)}" data-cumulative="${escapeHtml(formatValue(hotspot.cumulative, session.sampleUnit))}" data-cumulative-percent="${(session.total === 0 ? 0 : hotspot.cumulative / session.total * 100).toFixed(1)}">
       <td>${escapeHtml(hotspot.name)}</td><td>${formatValue(hotspot.flat, session.sampleUnit)}</td><td>${formatValue(hotspot.cumulative, session.sampleUnit)}</td>
       <td>${escapeHtml(hotspot.location ? `${hotspot.location.file}:${hotspot.location.line}` : '')}</td></tr>`).join('')}
   </tbody></table></section>
-  <section id="flame"><div class="toolbar"><button id="flame-reset" disabled>Reset zoom</button><span class="hint">Click to open source · Shift+click to zoom</span></div><div class="flame-root">${flameNodes(session.callTree, session.total)}</div></section>
-  <section id="calls"><table><thead><tr><th>Call path</th><th>Value</th><th>Total</th><th>Source</th></tr></thead><tbody>${callRows(session.callTree, session)}</tbody></table></section>
-  <section id="source"><table><thead><tr><th>Source line</th><th>Function</th><th>Self</th><th>With callees</th><th>Total</th></tr></thead><tbody>
+  <section id="source"><table><thead><tr><th>源码行</th><th>函数</th><th>自身</th><th>包含下游</th><th>占总量</th></tr></thead><tbody>
     ${[...session.lineMetrics].sort((left, right) => right.value - left.value).slice(0, 200).map((metric) => {
       const percent = session.total === 0 ? 0 : metric.value / session.total * 100;
       return `<tr class="source-row source-metric" data-runtime="${isRuntimeLine(metric)}" data-file="${escapeHtml(metric.file)}" data-line="${metric.line}"><td>${escapeHtml(`${metric.file}:${metric.line}`)}</td><td>${escapeHtml(metric.functionName)}</td><td>${metric.flat === undefined ? '—' : formatValue(metric.flat, session.sampleUnit)}</td><td>${formatValue(metric.value, session.sampleUnit)}</td><td>${percent.toFixed(1)}%</td></tr>`;
@@ -251,6 +230,16 @@ export function showProfilePanel(
   </tbody></table></section>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    const graphDetails = ${JSON.stringify(graphDetails).replaceAll('<', '\\u003c')};
+    const renderDetail = detail => {
+      if (!detail || !document.getElementById('detail-name')) return;
+      document.getElementById('detail-name').textContent = detail.name;
+      document.getElementById('detail-source').textContent = detail.source;
+      document.getElementById('detail-self').textContent = detail.self;
+      document.getElementById('detail-self-label').textContent = '自身 · ' + detail.selfPercent + '%';
+      document.getElementById('detail-cumulative').textContent = detail.cumulative;
+      document.getElementById('detail-cumulative-label').textContent = '包含下游 · ' + detail.cumulativePercent + '%';
+    };
     document.querySelectorAll('.tabs button').forEach(button => button.addEventListener('click', () => {
       document.querySelectorAll('.tabs button,section').forEach(element => element.classList.remove('active'));
       button.classList.add('active'); document.getElementById(button.dataset.tab).classList.add('active');
@@ -281,18 +270,26 @@ export function showProfilePanel(
     hideRuntime.addEventListener('change', updateVisibility);
     updateVisibility();
     document.querySelector('.top-row.focused')?.scrollIntoView({block:'center'});
-    const flameRoot = document.querySelector('.flame-root');
-    const originalFlame = flameRoot.innerHTML;
-    const reset = document.getElementById('flame-reset');
-    reset.addEventListener('click', () => { flameRoot.innerHTML = originalFlame; reset.disabled = true; });
     document.addEventListener('click', event => {
-      const target = event.target.closest('[data-file]');
-      if (event.shiftKey && target?.classList.contains('flame')) {
-        const copy = target.cloneNode(true);
-        copy.style.width = '100%';
-        flameRoot.replaceChildren(copy);
-        reset.disabled = false;
+      const graphNode = event.target.closest('g.node[id^="gotune-node-"]');
+      if (graphNode) {
+        const index = Number(graphNode.id.slice('gotune-node-'.length));
+        document.querySelectorAll('.profile-graph g.node.selected').forEach(node => node.classList.remove('selected'));
+        graphNode.classList.add('selected');
+        renderDetail(graphDetails[index]);
+        vscode.postMessage({ command:'graph-source', index });
         return;
+      }
+      const target = event.target.closest('[data-file]');
+      if (target?.classList.contains('top-row')) {
+        renderDetail({
+          name: target.dataset.name,
+          source: target.dataset.file ? target.dataset.file + ':' + target.dataset.line : '没有源码位置',
+          self: target.dataset.self,
+          selfPercent: target.dataset.selfPercent,
+          cumulative: target.dataset.cumulative,
+          cumulativePercent: target.dataset.cumulativePercent
+        });
       }
       if (target && target.dataset.file) vscode.postMessage({ command:'source', file:target.dataset.file, line:Number(target.dataset.line) });
     });
@@ -300,7 +297,14 @@ export function showProfilePanel(
 </body>
 </html>`;
   panel.webview.onDidReceiveMessage((message) => {
-    if (message?.command === 'source' && typeof message.file === 'string' && typeof message.line === 'number') {
+    if (
+      message?.command === 'graph-source'
+      && Number.isInteger(message.index)
+      && graph?.locations[message.index]
+    ) {
+      const location = graph.locations[message.index];
+      if (location) onOpenSource(location.file, location.line);
+    } else if (message?.command === 'source' && typeof message.file === 'string' && typeof message.line === 'number') {
       onOpenSource(message.file, message.line);
     } else if (
       message?.command === 'action'
@@ -309,6 +313,18 @@ export function showProfilePanel(
       onAction?.(message.action, actionHotspot);
     }
   });
+}
+
+function profileMetricLabel(sampleType: string): string {
+  if (sampleType === 'cpu') return 'CPU 时间';
+  if (sampleType === 'inuse_space') return '当前存活内存';
+  if (sampleType === 'inuse_objects') return '当前存活对象';
+  if (sampleType === 'alloc_space') return '累计分配内存';
+  if (sampleType === 'alloc_objects') return '累计分配对象';
+  if (/mutex/i.test(sampleType)) return '锁竞争等待';
+  if (/block|delay|contentions/i.test(sampleType)) return '阻塞等待';
+  if (/goroutine/i.test(sampleType)) return 'Goroutine';
+  return sampleType;
 }
 
 export function showMemoryTrendPanel(
@@ -323,6 +339,8 @@ export function showMemoryTrendPanel(
   );
   const nonce = Math.random().toString(36).slice(2);
   const growing = trend.entries.filter((entry) => entry.consistentlyGrowing && entry.growth > 0);
+  const unit = trend.sessions[0]?.sampleUnit ?? 'bytes';
+  const metricLabel = unit === 'bytes' ? 'live heap' : 'live objects';
   const growthClass = trend.totalGrowth > 0 ? 'bad' : 'good';
   const verdict = growing.length > 0
     ? `发现 ${growing.length} 个连续增长的业务代码分配点，需要进一步确认对象为什么仍被引用。`
@@ -346,11 +364,11 @@ export function showMemoryTrendPanel(
 </head>
 <body>
   <h1>Memory Growth / 内存增长检测</h1>
-  <div class="summary">三次快照均在强制 GC 后采集；这里展示仍存活内存的变化。</div>
+  <div class="summary">三次快照均在强制 GC 后采集；这里展示 ${metricLabel} 的变化。</div>
   <div class="verdict"><b>结论：</b>${escapeHtml(verdict)}</div>
   <div class="cards">
-    ${trend.totals.map((total, index) => `<div class="card"><strong>${formatValue(total, 'bytes')}</strong><span>${index === 0 ? 'Baseline' : `Round ${index}`} live heap</span></div>`).join('')}
-    <div class="card"><strong class="${growthClass}">${trend.totalGrowth > 0 ? '+' : ''}${formatValue(trend.totalGrowth, 'bytes')}</strong><span>Total change</span></div>
+    ${trend.totals.map((total, index) => `<div class="card"><strong>${formatValue(total, unit)}</strong><span>${index === 0 ? 'Baseline' : `Round ${index}`} ${metricLabel}</span></div>`).join('')}
+    <div class="card"><strong class="${growthClass}">${trend.totalGrowth > 0 ? '+' : ''}${formatValue(trend.totalGrowth, unit)}</strong><span>Total change</span></div>
   </div>
   <table>
     <thead><tr><th>业务函数</th>${trend.totals.map((_, index) => `<th class="number">${index === 0 ? 'Baseline' : `Round ${index}`}</th>`).join('')}<th class="number">增长</th><th>判断</th><th>源码</th></tr></thead>
@@ -359,8 +377,8 @@ export function showMemoryTrendPanel(
         const source = entry.location ? `${entry.location.file}:${entry.location.line}` : '';
         return `<tr data-file="${escapeHtml(entry.location?.file ?? '')}" data-line="${entry.location?.line ?? 0}">
           <td>${escapeHtml(entry.name)}</td>
-          ${entry.values.map((value) => `<td class="number">${formatValue(value, 'bytes')}</td>`).join('')}
-          <td class="number bad">+${formatValue(entry.growth, 'bytes')}</td>
+          ${entry.values.map((value) => `<td class="number">${formatValue(value, unit)}</td>`).join('')}
+          <td class="number bad">+${formatValue(entry.growth, unit)}</td>
           <td>${entry.consistentlyGrowing ? '<span class="badge">持续增长</span>' : '<span class="hint">有波动</span>'}</td>
           <td>${escapeHtml(source)}</td>
         </tr>`;
@@ -507,6 +525,7 @@ export function showGoroutineInspector(
     .filter((group) => group.severity !== 'normal')
     .reduce((sum, group) => sum + group.count, 0);
   const states = [...new Set(snapshot.groups.map((group) => group.state))].sort();
+  const assessment = assessGoroutineSnapshot(snapshot);
 
   panel.webview.html = `<!doctype html>
 <html>
@@ -532,12 +551,12 @@ export function showGoroutineInspector(
   <h1>Goroutine Inspector</h1>
   <div class="summary">Captured ${new Date(snapshot.capturedAt).toLocaleString()} · tool-owned goroutines excluded</div>
   <div class="cards">
-    <div class="card"><strong>${snapshot.total}${snapshot.totalDelta === 0 ? '' : ` (${snapshot.totalDelta > 0 ? '+' : ''}${snapshot.totalDelta})`}</strong><span>Application goroutines / change</span></div>
+    <div class="card"><strong>${snapshot.total}${snapshot.totalGrowth === 0 ? '' : ` (${snapshot.totalGrowth > 0 ? '+' : ''}${snapshot.totalGrowth})`}</strong><span>Application goroutines / growth since first sample</span></div>
     <div class="card"><strong>${snapshot.groups.length}</strong><span>Unique stack groups</span></div>
     <div class="card"><strong>${snapshot.stateCount}</strong><span>Runtime states</span></div>
     <div class="card"><strong>${snapshot.suspiciousCount}</strong><span>Suspicious after repeated captures</span></div>
   </div>
-  <div class="notice">A blocked goroutine is not automatically a deadlock. Capture again while the same operation should be progressing; unchanged channel/lock groups are promoted from <b>Watch</b> to <b>Suspicious</b>.</div>
+  <div class="notice"><b>${escapeHtml(assessment.title)}</b><br>${escapeHtml(assessment.detail)}</div>
   <div class="toolbar">
     <input id="filter" placeholder="Filter state, function, or source">
     <select id="state"><option value="">All states</option>${states.map((state) => `<option value="${escapeHtml(state)}">${escapeHtml(state)}</option>`).join('')}</select>
@@ -545,7 +564,7 @@ export function showGoroutineInspector(
     <span class="hint">${watched} goroutine(s) need review</span>
   </div>
   <table>
-    <thead><tr><th class="number">Count</th><th class="number">Change</th><th>State</th><th>Top frame</th><th>Stability</th><th>Assessment</th><th>Source</th></tr></thead>
+    <thead><tr><th class="number">Count</th><th class="number">Growth</th><th>State</th><th>Top frame</th><th>Stability</th><th>Assessment</th><th>Source</th></tr></thead>
     <tbody>
       ${snapshot.groups.map((group, index) => {
         const top = group.frames.find((frame) => frame.file) ?? group.frames[0];
@@ -553,7 +572,7 @@ export function showGoroutineInspector(
         const filter = `${group.state} ${group.topFunction} ${source}`.toLowerCase();
         return `<tr class="group-row" data-index="${index}" data-state="${escapeHtml(group.state)}" data-severity="${group.severity}" data-filter="${escapeHtml(filter)}">
           <td class="number">${group.count}</td>
-          <td class="number">${group.countDelta === 0 ? '—' : `${group.countDelta > 0 ? '+' : ''}${group.countDelta}`}</td>
+          <td class="number">${group.countGrowth === 0 ? '—' : `${group.countGrowth > 0 ? '+' : ''}${group.countGrowth}`}</td>
           <td>${escapeHtml(group.state)}${group.waitDetail ? `<br><span class="hint">${escapeHtml(group.waitDetail)}</span>` : ''}</td>
           <td>${escapeHtml(group.topFunction)}</td>
           <td>${group.stableCaptures} capture${group.stableCaptures === 1 ? '' : 's'}</td>

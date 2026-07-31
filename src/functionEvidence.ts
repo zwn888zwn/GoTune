@@ -2,6 +2,7 @@ import {
   EvidenceKind,
   GoFunctionReference,
   Hotspot,
+  PerformanceFinding,
   ProfileSession,
   SourceLocation
 } from './model';
@@ -37,6 +38,7 @@ export interface FunctionEvidenceItem {
 export interface FunctionEvidenceReport {
   function: GoFunctionReference;
   items: FunctionEvidenceItem[];
+  findings: PerformanceFinding[];
   availableKinds: EvidenceKind[];
 }
 
@@ -44,7 +46,8 @@ export function collectFunctionEvidence(
   fn: GoFunctionReference,
   sessions: ProfileSession[],
   baselineSessionIds?: string | string[],
-  sourcePathMappings: Record<string, string> = {}
+  sourcePathMappings: Record<string, string> = {},
+  findings: PerformanceFinding[] = []
 ): FunctionEvidenceReport {
   const baselineIds = new Set(
     typeof baselineSessionIds === 'string'
@@ -88,10 +91,26 @@ export function collectFunctionEvidence(
       hotspot
     }];
   });
+  const matchingFindings = findings
+    .filter((finding) =>
+      finding.location
+        ? sourcePathsMatch(fn.file, finding.location.file, sourcePathMappings)
+          && finding.location.line >= fn.startLine
+          && finding.location.line <= fn.endLine
+        : Boolean(finding.functionName && functionNameMatches(finding.functionName, fn.name))
+    )
+    .sort((left, right) =>
+      findingSeverityRank(right.severity) - findingSeverityRank(left.severity)
+      || right.createdAt - left.createdAt
+    );
   return {
     function: fn,
     items,
-    availableKinds: [...new Set(items.map((item) => item.kind))]
+    findings: matchingFindings,
+    availableKinds: [...new Set([
+      ...items.map((item) => item.kind),
+      ...matchingFindings.map((finding) => finding.kind)
+    ])]
   };
 }
 
@@ -182,4 +201,11 @@ function functionNameMatches(profileName: string, symbolName: string): boolean {
 
 function percent(value: number, total: number): number {
   return total === 0 ? 0 : value / total * 100;
+}
+
+function findingSeverityRank(severity: PerformanceFinding['severity']): number {
+  if (severity === 'suspicious') return 3;
+  if (severity === 'watch') return 2;
+  if (severity === 'verified') return 1;
+  return 0;
 }
