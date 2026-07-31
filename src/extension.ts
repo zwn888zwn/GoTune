@@ -161,7 +161,7 @@ class FunctionEvidenceCodeActionProvider implements vscode.CodeActionProvider {
       configuredSourcePathMappings(),
       activeInvestigationFindings()
     );
-    const inspect = new vscode.CodeAction('GoTune: 分析当前函数性能', vscode.CodeActionKind.QuickFix);
+    const inspect = new vscode.CodeAction('GoTune: 采集并分析当前函数', vscode.CodeActionKind.QuickFix);
     inspect.command = {
       command: 'gotune.analyzeCurrentFunction',
       title: inspect.title,
@@ -312,6 +312,13 @@ export function activate(context: vscode.ExtensionContext): void {
       if (editor?.document.languageId === 'go') {
         applyProfileHeatToEditor(editor, heatDecoration, heatLabelDecoration);
         codeLensProvider.refresh();
+      }
+    }),
+    vscode.window.onDidChangeVisibleTextEditors((editors) => {
+      for (const editor of editors) {
+        if (editor.document.languageId === 'go') {
+          applyProfileHeatToEditor(editor, heatDecoration, heatLabelDecoration);
+        }
       }
     }),
     vscode.window.registerTreeDataProvider('gotune.running', runningProvider),
@@ -786,15 +793,14 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.commands.registerCommand('gotune.captureAllocations', async () => {
-      const seconds = vscode.workspace.getConfiguration('gotune').get<number>('captureCpuSeconds', 10);
       void vscode.window.showInformationMessage(
-        `GoTune: Reproduce the allocation-heavy operation now. Bytes and object counts are measured for ${seconds} seconds.`
+        'GoTune：正在采集程序启动以来的累计分配空间和对象数量。'
       );
       await captureManagedProfiles(
-        `allocs?seconds=${seconds}`,
-        'Allocation delta',
+        'allocs',
+        '累计分配',
         ['alloc_space', 'alloc_objects'],
-        seconds * 1000 + 15_000
+        15_000
       );
     }),
     vscode.commands.registerCommand('gotune.captureGoroutines', async () => {
@@ -1668,11 +1674,12 @@ export function activate(context: vscode.ExtensionContext): void {
         return session;
       });
       pprofViewer.registerProfile(captured.map((session) => session.id), bytes);
-      captured.forEach((session, index) => addSession(
-        session,
-        showResult && index === captured.length - 1,
-        investigationId
-      ));
+      captured.forEach((session) => addSession(session, false, investigationId));
+      const primary = captured[0];
+      if (primary) {
+        setActive(primary);
+        if (showResult) await showSessionProfile(primary);
+      }
       if (captured.some((session) => session.sampleType === 'cpu' && session.total === 0)) {
         void vscode.window.showWarningMessage(
           'GoTune: No CPU samples were recorded. The target was idle; generate workload during the capture window.'
@@ -3174,7 +3181,7 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     if (exact?.location) return exact.location;
     const exactLine = session.lineMetrics.find((metric) =>
-      metric.functionName === name && isWorkspaceSourcePath(metric.file)
+      metric.functionName === name
     );
     if (exactLine) return { file: exactLine.file, line: exactLine.line };
     const suffix = session.hotspots.find((hotspot) =>
@@ -3497,12 +3504,7 @@ async function openSource(
   const position = new vscode.Position(targetLine, 0);
   editor.selection = new vscode.Selection(position, position);
   editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
-  if (!applyProfileHeat) {
-    editor.setDecorations(heatDecoration, []);
-    editor.setDecorations(heatLabelDecoration, []);
-    return;
-  }
-  applyProfileHeatToEditor(editor, heatDecoration, heatLabelDecoration);
+  if (applyProfileHeat) applyProfileHeatToEditor(editor, heatDecoration, heatLabelDecoration);
 }
 
 async function showRelatedSyncCode(location: SourceLocation): Promise<void> {
@@ -3577,7 +3579,6 @@ function applyProfileHeatToEditor(
       .filter((metric) =>
         metric.value > 0
         && !isRuntimeLine(metric)
-        && isWorkspaceSourcePath(metric.file)
         && sameSource(uri.fsPath, metric.file)
       )
       .sort((left, right) =>

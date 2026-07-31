@@ -90,7 +90,7 @@
       },
       {
         "command": "gotune.analyzeCurrentFunction",
-        "title": "GoTune: 分析当前函数性能",
+        "title": "GoTune: 采集并分析当前函数",
         "icon": "$(symbol-method)"
       },
       {
@@ -123,7 +123,7 @@
       },
       {
         "command": "gotune.showCurrentFunctionInProfile",
-        "title": "GoTune: 在 pprof 中定位当前函数"
+        "title": "GoTune: 在当前 Profile 中定位"
       },
       {
         "command": "gotune.setBaseline",

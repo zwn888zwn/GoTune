@@ -175,7 +175,6 @@ function pprofBridgeScript(): string {
     return title.replace(/\s+\([^)]*\)\s*$/, '').trim();
   };
   let initialGraphViewBox;
-  let graphOverviewApplied = false;
   let graphDragEndedAt = 0;
   const graphSvg = () => document.querySelector('#graph svg');
   const installGraphPan = (svg) => {
@@ -271,33 +270,6 @@ function pprofBridgeScript(): string {
     for (const text of svg.querySelectorAll('g.node text')) {
       const size = Number(text.getAttribute('font-size'));
       if (Number.isFinite(size) && size < 10) text.setAttribute('font-size', '10');
-    }
-    if (!graphOverviewApplied) {
-      graphOverviewApplied = true;
-      setTimeout(() => {
-        const nodes = [...svg.querySelectorAll('g.node')];
-        const target = nodes.sort((left, right) => {
-          const a = left.getBoundingClientRect();
-          const b = right.getBoundingClientRect();
-          return b.width * b.height - a.width * a.height;
-        })[0];
-        if (!target || document.querySelector('g.node.gotune-target')) return;
-        const screenMatrix = svg.getScreenCTM();
-        if (!screenMatrix) return;
-        const bounds = target.getBoundingClientRect();
-        const point = svg.createSVGPoint();
-        point.x = bounds.left + bounds.width / 2;
-        point.y = bounds.top + bounds.height / 2;
-        const center = point.matrixTransform(screenMatrix.inverse());
-        const view = svg.viewBox.baseVal;
-        const width = initialGraphViewBox.width * .58;
-        const aspect = Math.max(.4, svg.clientWidth / Math.max(1, svg.clientHeight));
-        const height = Math.min(initialGraphViewBox.height, width / aspect);
-        view.x = center.x - width / 2;
-        view.y = center.y - height / 2;
-        view.width = width;
-        view.height = height;
-      }, 80);
     }
   };
   const graphNodeFor = (functionName) => {

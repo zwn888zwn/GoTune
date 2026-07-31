@@ -57,7 +57,7 @@ test('injects a non-invasive IDE bridge into official pprof HTML', () => {
   assert.match(bridged, /deltaX \* 1\.35/);
   assert.match(bridged, /svg\.style\.cursor = 'grab'/);
   assert.match(bridged, /graphDragEndedAt/);
-  assert.match(bridged, /graphOverviewApplied/);
+  assert.doesNotMatch(bridged, /graphOverviewApplied/);
   assert.match(bridged, /if \(flameFunction\(event\.target\) \|\| topFunction\(event\.target\)\) return/);
   assert.match(bridged, /scrollbar-width:thin/);
   assert.match(

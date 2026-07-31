@@ -76,8 +76,13 @@ export class PprofViewer implements vscode.Disposable, vscode.WebviewViewProvide
     if (!artifact) {
       throw new Error('原始 Profile 只在本次 VS Code 运行中保留，请重新采集或导入后再打开。');
     }
+    const changingProfile = this.options?.session.source !== options.session.source;
     this.options = options;
-    this.selectedFunction = options.focusedFunction ?? '';
+    if (options.focusedFunction) {
+      this.selectedFunction = options.focusedFunction;
+    } else if (changingProfile) {
+      this.selectedFunction = '';
+    }
     if (this.activeSessionId !== options.session.id || !this.child || !this.proxyUrl) {
       await this.start(options, artifact);
     }
@@ -366,6 +371,7 @@ function viewerHtml(
   const nonce = Math.random().toString(36).slice(2);
   const model = JSON.stringify({
     proxyUrl,
+    profileKey: session.source,
     activeView,
     graphNodeCount,
     graphNodeFraction,
@@ -456,6 +462,8 @@ function viewerHtml(
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const model = ${model};
+    const savedState = vscode.getState();
+    const restoredState = savedState?.profileKey===model.profileKey?savedState:{};
     const frame = document.getElementById('official');
     const tree = document.getElementById('tree');
     const sample = document.getElementById('sample');
@@ -480,7 +488,17 @@ function viewerHtml(
     let graphEdgeFraction = model.graphEdgeFraction;
     let graphCallTree = model.graphCallTree;
     let graphLocateExpanded = false;
-    let expanded = new Set();
+    let expanded = new Set(restoredState.expanded||[]);
+    search.value=restoredState.search||'';
+    treePercentMode.value=restoredState.treePercentMode||'total';
+    treeSingleClick.checked=Boolean(restoredState.treeSingleClick);
+    const saveState=()=>vscode.setState({
+      profileKey:model.profileKey,
+      search:search.value,
+      expanded:[...expanded],
+      treePercentMode:treePercentMode.value,
+      treeSingleClick:treeSingleClick.checked
+    });
     const colors = {
       bg:getComputedStyle(document.body).getPropertyValue('--vscode-editor-background').trim(),
       fg:getComputedStyle(document.body).getPropertyValue('--vscode-foreground').trim(),
@@ -585,7 +603,7 @@ function viewerHtml(
         const guides='<span class="tree-guide"></span>'.repeat(Math.max(0,row.depth-1));
         const branch=row.depth?'<span class="tree-branch">└</span>':'';
         element.innerHTML='<span class="function">'+guides+branch+'<button class="twisty" title="'+(row.hasChildren?'展开或折叠调用层级':'')+'">'+(row.hasChildren?(expanded.has(row.id)?'⌄':'›'):'')+'</button><span class="tree-name">'+escapeText(row.name)+'</span></span><span>'+format(row.flat)+'</span><span>'+rowPercent(row.flat,row)+'</span><span>'+format(row.value)+'</span><span>'+rowPercent(row.value,row)+'</span>';
-        element.querySelector('.twisty').addEventListener('click',event=>{event.stopPropagation();if(row.hasChildren){expanded.has(row.id)?expanded.delete(row.id):expanded.add(row.id);renderTree()}});
+        element.querySelector('.twisty').addEventListener('click',event=>{event.stopPropagation();if(row.hasChildren){expanded.has(row.id)?expanded.delete(row.id):expanded.add(row.id);saveState();renderTree()}});
         element.addEventListener('click',()=>{choose(row.name);vscode.postMessage({command:'selected-function',functionName:row.name});if(treeSingleClick.checked)vscode.postMessage({command:'open-function',functionName:row.name})});
         element.addEventListener('dblclick',()=>{if(!treeSingleClick.checked)vscode.postMessage({command:'open-function',functionName:row.name})});
         container.appendChild(element);
@@ -596,8 +614,9 @@ function viewerHtml(
     for(const item of model.sampleTypes){const option=document.createElement('option');option.value=item.name;option.textContent=item.label;option.selected=item.name===model.sampleType;sample.appendChild(option)}
     sample.addEventListener('change',()=>vscode.postMessage({command:'change-sample',sampleType:sample.value}));
     more.addEventListener('change',()=>{if(more.value)setView(more.value)});
-    search.addEventListener('input',()=>searchProfile(search.value));
-    treePercentMode.addEventListener('change',renderTree);
+    search.addEventListener('input',()=>{saveState();searchProfile(search.value)});
+    treePercentMode.addEventListener('change',()=>{saveState();renderTree()});
+    treeSingleClick.addEventListener('change',saveState);
     frame.addEventListener('load',sendTheme);
     window.addEventListener('message',event=>{
       const message=event.data;
