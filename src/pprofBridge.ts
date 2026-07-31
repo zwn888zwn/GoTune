@@ -35,14 +35,14 @@ function pprofBridgeScript(): string {
     '::-webkit-scrollbar-corner{background:transparent}',
     'html,body{background:var(--gotune-bg,#1e1e1e)!important;color:var(--gotune-fg,#cccccc)!important}',
     '#top,#content,#graph,#flamegraph{top:0!important}',
-    '#graph{background-color:var(--gotune-bg,#1e1e1e)!important;background-image:linear-gradient(var(--gotune-border,#343b43) 1px,transparent 1px),linear-gradient(90deg,var(--gotune-border,#343b43) 1px,transparent 1px)!important;background-size:24px 24px!important}',
-    '#graph svg{width:100%!important;height:100%!important;padding:16px!important}',
+    '#graph{background-color:var(--gotune-bg,#1e1e1e)!important;background-image:linear-gradient(rgba(127,127,127,.10) 1px,transparent 1px),linear-gradient(90deg,rgba(127,127,127,.10) 1px,transparent 1px)!important;background-size:32px 32px!important}',
+    '#graph svg{width:100%!important;height:100%!important;padding:20px!important}',
     '#graph svg>g.graph>polygon[fill="white"]{fill:var(--gotune-bg,#1e1e1e)!important}',
     '#graph g.edge text{fill:var(--gotune-fg,#cccccc)!important;font-family:system-ui,sans-serif!important}',
-    '#graph g.edge path{stroke:var(--gotune-muted,#8b949e)!important}',
-    '#graph g.edge polygon{stroke:var(--gotune-muted,#8b949e)!important;fill:var(--gotune-muted,#8b949e)!important}',
+    '#graph g.edge path{stroke:var(--gotune-muted,#8b949e)!important;stroke-opacity:.72}',
+    '#graph g.edge polygon{stroke:var(--gotune-muted,#8b949e)!important;fill:var(--gotune-muted,#8b949e)!important;fill-opacity:.82}',
     '#graph g.node text{fill:#f0f3f6!important;font-family:system-ui,sans-serif!important;font-weight:500}',
-    '#graph g.node polygon{stroke-width:1.25px!important;filter:saturate(.72) brightness(.72) drop-shadow(0 2px 3px rgba(0,0,0,.32))}',
+    '#graph g.node polygon{stroke-width:1.25px!important;filter:saturate(.62) brightness(.64) drop-shadow(0 3px 5px rgba(0,0,0,.38))}',
     '#graph g.node.gotune-target polygon{stroke:var(--gotune-selection,#4daafc)!important;stroke-width:4px!important;filter:drop-shadow(0 0 7px var(--gotune-selection,#4daafc))}',
     '#stack-holder,#current-details{background:var(--gotune-bg,#1e1e1e)!important;color:var(--gotune-fg,#cccccc)!important}',
     '#stack-chart{background-image:linear-gradient(var(--gotune-border,#343b43) 1px,transparent 1px);background-size:100% 20px}',
@@ -82,11 +82,14 @@ function pprofBridgeScript(): string {
     const header = table?.querySelector('tr');
     if (!table || !header) return;
     [...header.children].forEach((cell, column) => {
+      if (/^sum%$/i.test(cell.textContent.trim())) return;
       if (cell.dataset.gotuneSort) return;
       cell.dataset.gotuneSort = 'ready';
       cell.classList.add('gotune-sortable');
       cell.addEventListener('click', () => {
-        const ascending = cell.dataset.direction !== 'asc';
+        const ascending = cell.dataset.direction
+          ? cell.dataset.direction !== 'asc'
+          : !/flat|cum/i.test(cell.textContent);
         for (const sibling of header.children) {
           delete sibling.dataset.direction;
           sibling.textContent = sibling.textContent.replace(/\s+[▲▼]$/, '');
@@ -105,6 +108,16 @@ function pprofBridgeScript(): string {
         });
         const parent = rows[0]?.parentElement;
         if (parent) rows.forEach((row) => parent.appendChild(row));
+        const headers = [...header.children].map((item) => item.textContent.trim().toLowerCase());
+        const flatPercentColumn = headers.findIndex((item) => item.startsWith('flat%'));
+        const sumPercentColumn = headers.findIndex((item) => item.startsWith('sum%'));
+        if (flatPercentColumn >= 0 && sumPercentColumn >= 0) {
+          let sum = 0;
+          for (const row of rows) {
+            sum += Number.parseFloat(row.children[flatPercentColumn]?.textContent || '0') || 0;
+            row.children[sumPercentColumn].textContent = Math.min(100, sum).toFixed(2) + '%';
+          }
+        }
       });
     });
   };
@@ -162,6 +175,7 @@ function pprofBridgeScript(): string {
     return title.replace(/\s+\([^)]*\)\s*$/, '').trim();
   };
   let initialGraphViewBox;
+  let graphOverviewApplied = false;
   const graphSvg = () => document.querySelector('#graph svg');
   const installGraphPan = (svg) => {
     if (!svg || svg.dataset.gotunePan) return;
@@ -203,6 +217,33 @@ function pprofBridgeScript(): string {
     for (const text of svg.querySelectorAll('g.node text')) {
       const size = Number(text.getAttribute('font-size'));
       if (Number.isFinite(size) && size < 10) text.setAttribute('font-size', '10');
+    }
+    if (!graphOverviewApplied) {
+      graphOverviewApplied = true;
+      setTimeout(() => {
+        const nodes = [...svg.querySelectorAll('g.node')];
+        const target = nodes.sort((left, right) => {
+          const a = left.getBoundingClientRect();
+          const b = right.getBoundingClientRect();
+          return b.width * b.height - a.width * a.height;
+        })[0];
+        if (!target || document.querySelector('g.node.gotune-target')) return;
+        const screenMatrix = svg.getScreenCTM();
+        if (!screenMatrix) return;
+        const bounds = target.getBoundingClientRect();
+        const point = svg.createSVGPoint();
+        point.x = bounds.left + bounds.width / 2;
+        point.y = bounds.top + bounds.height / 2;
+        const center = point.matrixTransform(screenMatrix.inverse());
+        const view = svg.viewBox.baseVal;
+        const width = initialGraphViewBox.width * .58;
+        const aspect = Math.max(.4, svg.clientWidth / Math.max(1, svg.clientHeight));
+        const height = Math.min(initialGraphViewBox.height, width / aspect);
+        view.x = center.x - width / 2;
+        view.y = center.y - height / 2;
+        view.width = width;
+        view.height = height;
+      }, 80);
     }
   };
   const graphNodeFor = (functionName) => {
@@ -318,7 +359,9 @@ function pprofBridgeScript(): string {
   const functionAt = (target) => topFunction(target) || graphFunction(target) || flameFunction(target);
   document.addEventListener('click', (event) => {
     const functionName = functionAt(event.target);
-    if (functionName) host({ command: 'selected-function', functionName });
+    if (!functionName) return;
+    host({ command: 'selected-function', functionName });
+    if (topFunction(event.target)) host({ command: 'open-function', functionName });
   }, true);
   document.addEventListener('dblclick', (event) => {
     const location = sourceLocation(event.target);
@@ -326,7 +369,8 @@ function pprofBridgeScript(): string {
       host({ command: 'open-source', ...location });
       return;
     }
-    const functionName = functionAt(event.target);
+    if (flameFunction(event.target) || topFunction(event.target)) return;
+    const functionName = graphFunction(event.target);
     if (functionName) host({ command: 'open-function', functionName });
   }, true);
   window.addEventListener('message', (event) => {

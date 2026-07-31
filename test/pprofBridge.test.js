@@ -46,10 +46,14 @@ test('injects a non-invasive IDE bridge into official pprof HTML', () => {
   assert.match(bridged, /graph-control/);
   assert.match(bridged, /gotune-target/);
   assert.match(bridged, /installTopSorting/);
+  assert.match(bridged, /\^sum%\$/);
+  assert.match(bridged, /sumPercentColumn/);
   assert.match(bridged, /gotune-flame-tooltip/);
   assert.match(bridged, /gotune-tooltip-track/);
   assert.match(bridged, /removeAttribute\('title'\)/);
   assert.match(bridged, /installGraphPan/);
+  assert.match(bridged, /graphOverviewApplied/);
+  assert.match(bridged, /if \(flameFunction\(event\.target\) \|\| topFunction\(event\.target\)\) return/);
   assert.match(bridged, /scrollbar-width:thin/);
   assert.match(
     bridged,

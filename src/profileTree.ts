@@ -6,6 +6,7 @@ export interface ProfileTreeRow {
   name: string;
   value: number;
   flat: number;
+  parentValue?: number;
   depth: number;
   hasChildren: boolean;
 }
@@ -15,6 +16,7 @@ export function profileTreeRows(session: ProfileSession, limit = 1500): ProfileT
   const visit = (
     nodes: ProfileSession['callTree'],
     parentId: string | undefined,
+    parentValue: number | undefined,
     depth: number
   ) => {
     for (const node of [...nodes].sort((left, right) => right.value - left.value)) {
@@ -25,6 +27,7 @@ export function profileTreeRows(session: ProfileSession, limit = 1500): ProfileT
         parentId,
         name: node.name,
         value: node.value,
+        parentValue,
         flat: Math.max(
           0,
           node.value - node.children.reduce((sum, child) => sum + child.value, 0)
@@ -32,9 +35,9 @@ export function profileTreeRows(session: ProfileSession, limit = 1500): ProfileT
         depth,
         hasChildren: node.children.length > 0
       });
-      visit(node.children, id, depth + 1);
+      visit(node.children, id, node.value, depth + 1);
     }
   };
-  visit(session.callTree, undefined, 0);
+  visit(session.callTree, undefined, undefined, 0);
   return rows;
 }

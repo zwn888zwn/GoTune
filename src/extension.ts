@@ -3570,10 +3570,10 @@ function applyProfileHeatToEditor(
     session: ProfileSession;
     metric: ProfileSession['lineMetrics'][number];
     kind: EvidenceKind;
-    rank: number;
+    hot: boolean;
   }>>();
   for (const session of evidenceSessions) {
-    const importantMetrics = [...session.lineMetrics]
+    const candidates = [...session.lineMetrics]
       .filter((metric) =>
         metric.value > 0
         && !isRuntimeLine(metric)
@@ -3582,26 +3582,29 @@ function applyProfileHeatToEditor(
       )
       .sort((left, right) =>
         Math.max(right.flat ?? 0, right.value) - Math.max(left.flat ?? 0, left.value)
-      )
+      );
+    const hottestScore = candidates.length > 0
+      ? Math.max(candidates[0].flat ?? 0, candidates[0].value)
+      : 0;
+    const importantMetrics = candidates
+      .filter((metric, index) => {
+        const score = Math.max(metric.flat ?? 0, metric.value);
+        const share = session.total ? score / session.total : 0;
+        return index === 0 || score >= hottestScore * 0.08 || share >= 0.005;
+      })
       .slice(0, 8);
     for (const [rank, metric] of importantMetrics.entries()) {
       const line = Math.max(0, Math.min(document.lineCount - 1, metric.line - 1));
       const kind = profileEvidenceKind(session.sampleType);
+      const score = Math.max(metric.flat ?? 0, metric.value);
+      const hot = rank === 0 || (rank < 3 && score >= hottestScore * 0.45);
       const entries = grouped.get(line) ?? [];
       if (!entries.some((entry) => entry.session.sampleType === session.sampleType)) {
-        entries.push({ session, metric, kind, rank });
+        entries.push({ session, metric, kind, hot });
         grouped.set(line, entries);
       }
     }
   }
-  const lineDecorations = [...grouped.entries()]
-    .filter(([, entries]) => entries.some((entry) => entry.rank < 3))
-    .map(([line]) => {
-      const metricLine = Math.max(0, Math.min(document.lineCount - 1, line));
-      return {
-        range: document.lineAt(metricLine).range
-      };
-    });
   const labels = [...grouped.entries()].map(([line, entries]) => {
     const metricLine = Math.max(0, Math.min(document.lineCount - 1, line));
     const lineRange = document.lineAt(metricLine).range;
@@ -3632,7 +3635,7 @@ function applyProfileHeatToEditor(
       }
       return `${functionEvidenceKindLabel(kind)} ${percent.toFixed(1)}%`;
     });
-    const isHottest = entries.some((entry) => entry.rank < 3);
+    const isHottest = entries.some((entry) => entry.hot);
     const hover = new vscode.MarkdownString(
       `**${parts.join(' · ')}**\n\n`
       + '自身：直接发生在这一行的开销。包含下游：执行路径经过这一行后，连同后续调用产生的开销。'
@@ -3651,7 +3654,7 @@ function applyProfileHeatToEditor(
       }
     };
   });
-  editor.setDecorations(heatDecoration, lineDecorations);
+  editor.setDecorations(heatDecoration, []);
   editor.setDecorations(heatLabelDecoration, labels);
 }
 

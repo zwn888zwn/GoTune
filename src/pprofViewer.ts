@@ -394,13 +394,14 @@ function viewerHtml(
     .spacer{flex:1}.metric{display:flex;align-items:center;gap:6px;color:var(--vscode-descriptionForeground)}select{color:var(--vscode-dropdown-foreground);background:var(--vscode-dropdown-background);border:1px solid var(--vscode-dropdown-border);padding:4px 7px}
     .search{width:180px;min-width:90px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border);padding:4px 7px}
     .selection{max-width:30%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--vscode-descriptionForeground)}
+    .tree-tools{display:flex;align-items:center;gap:8px;color:var(--vscode-descriptionForeground)}.tree-tools[hidden]{display:none}.tree-tools label{display:flex;align-items:center;gap:5px;white-space:nowrap}
     .warning{padding:5px 10px;background:var(--vscode-inputValidation-warningBackground);color:var(--vscode-inputValidation-warningForeground)}
     main{position:relative;flex:1;min-height:0}.view{position:absolute;inset:0}iframe{width:100%;height:100%;border:0;background:var(--vscode-editor-background)}
     .graph-tools{position:absolute;z-index:3;left:10px;top:10px;display:flex;flex-direction:column;gap:4px}.graph-tools[hidden]{display:none!important}.graph-tools button{width:30px;height:30px;border:1px solid var(--vscode-button-border,transparent);border-radius:4px;color:var(--vscode-foreground);background:var(--vscode-editorWidget-background);box-shadow:0 2px 7px rgba(0,0,0,.25);cursor:pointer}.graph-tools button:hover{background:var(--vscode-toolbar-hoverBackground)}
     .config-wrap{position:relative}.config-panel{position:absolute;z-index:20;top:35px;right:0;width:280px;padding:14px;border:1px solid var(--vscode-widget-border,var(--vscode-panel-border));border-radius:8px;background:var(--vscode-editorWidget-background);box-shadow:0 8px 24px rgba(0,0,0,.35)}.config-panel[hidden]{display:none}.config-title{font-weight:600;font-size:14px;margin-bottom:12px}.config-row{display:grid;grid-template-columns:1fr 110px;align-items:center;gap:10px;margin:9px 0}.config-row input{width:100%;padding:5px 7px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border)}.config-check{display:flex;align-items:center;gap:8px;margin:12px 0}.config-actions{display:flex;justify-content:flex-end;gap:7px;padding-top:11px;border-top:1px solid var(--vscode-panel-border)}
     #tree{overflow:auto}.tree-header,.tree-row{display:grid;grid-template-columns:minmax(360px,1fr) 110px 90px 120px 110px;min-width:820px;align-items:stretch;border-bottom:1px solid var(--vscode-panel-border)}
     .tree-header{position:sticky;top:0;z-index:2;background:var(--vscode-editorGroupHeader-tabsBackground);font-weight:600}.tree-header>span,.tree-row>span{padding:5px 8px;text-align:right;display:flex;align-items:center;justify-content:flex-end}.tree-header>span:first-child,.tree-row>span:first-child{text-align:left;justify-content:flex-start}
-    .tree-row{cursor:default;min-height:29px}.tree-row:hover{background:var(--vscode-list-hoverBackground)}.tree-row.selected{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}
+    .tree-row{cursor:default;min-height:29px}.tree-row:hover{background:var(--vscode-list-hoverBackground)}.tree-row.selected{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}.tree-row.match .tree-name{color:var(--vscode-editor-findMatchForeground);background:var(--vscode-editor-findMatchHighlightBackground);border-radius:2px}
     .function{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tree-guide{align-self:stretch;flex:0 0 16px;border-left:1px solid var(--vscode-tree-indentGuidesStroke,var(--vscode-panel-border));opacity:.8}.tree-branch{flex:0 0 14px;color:var(--vscode-tree-indentGuidesStroke,var(--vscode-descriptionForeground))}.twisty{flex:0 0 18px;width:18px;height:18px;margin-right:3px;padding:0;border:0;border-radius:3px;color:inherit;background:transparent;line-height:16px;cursor:pointer}.twisty:hover{background:var(--vscode-toolbar-hoverBackground)}.tree-name{overflow:hidden;text-overflow:ellipsis}.empty{padding:24px;color:var(--vscode-descriptionForeground)}
   </style>
 </head>
@@ -422,6 +423,10 @@ function viewerHtml(
     <span class="selection" id="selection"></span>
     <span class="spacer"></span>
     <input class="search" id="search" placeholder="搜索函数（正则）">
+    <div class="tree-tools" id="treeTools" hidden>
+      <label>占比：<select id="treePercentMode"><option value="total">总量</option><option value="parent">父节点</option></select></label>
+      <label><input id="treeSingleClick" type="checkbox">单击打开源码</label>
+    </div>
     <div class="config-wrap">
       <button class="tool" id="configure" title="配置调用图">⚙ Graph 配置</button>
       <div class="config-panel" id="configPanel" hidden>
@@ -444,7 +449,7 @@ function viewerHtml(
     </div>
     <iframe id="official" class="view"></iframe>
     <div id="tree" class="view" hidden>
-      <div class="tree-header"><span>函数</span><span>自身</span><span>自身占比</span><span>累计</span><span>累计占比</span></div>
+      <div class="tree-header"><span>函数</span><span>自身</span><span id="treeFlatPercent">自身占比</span><span>累计</span><span id="treeCumPercent">累计占比</span></div>
       <div id="treeRows"></div>
     </div>
   </main>
@@ -464,6 +469,9 @@ function viewerHtml(
     const configNodeFraction = document.getElementById('configNodeFraction');
     const configEdgeFraction = document.getElementById('configEdgeFraction');
     const configCallTree = document.getElementById('configCallTree');
+    const treeTools = document.getElementById('treeTools');
+    const treePercentMode = document.getElementById('treePercentMode');
+    const treeSingleClick = document.getElementById('treeSingleClick');
     let currentView = model.activeView;
     let selectedFunction = model.selectedFunction;
     let pendingFocus = Boolean(model.selectedFunction);
@@ -496,7 +504,6 @@ function viewerHtml(
       }
       return new Intl.NumberFormat().format(value);
     };
-    const percent = value => model.total ? (value/model.total*100).toFixed(2)+'%' : '0.00%';
     const viewPath = view => view==='top'?'/ui/top':view==='flame'?'/ui/flamegraph':view==='peek'?'/ui/peek':view==='source'?'/ui/source':'/ui/';
     const iframeUrl = () => {
       const params=new URLSearchParams({si:sample.value});
@@ -530,10 +537,33 @@ function viewerHtml(
       tree.hidden=view!=='tree';frame.hidden=view==='tree';
       document.getElementById('graphTools').hidden=view!=='graph';
       configure.hidden=view!=='graph';
-      if(view==='tree')renderTree();else{pendingFocus=Boolean(selectedFunction);frame.src=iframeUrl()}
+      treeTools.hidden=view!=='tree';
+      if(view==='tree'){revealTreeSelection();renderTree()}else{pendingFocus=Boolean(selectedFunction);frame.src=iframeUrl()}
       vscode.postMessage({command:'change-view',view});
     };
-    const visibleRows = () => {
+    const revealTreeSelection = () => {
+      if(!selectedFunction)return;
+      const row=model.tree.find(item=>item.name===selectedFunction);
+      if(!row)return;
+      const byId=new Map(model.tree.map(item=>[item.id,item]));
+      let current=row;
+      while(current?.parentId){expanded.add(current.parentId);current=byId.get(current.parentId)}
+    };
+    const matchesTree = (name,query) => {
+      if(!query)return false;
+      try{return new RegExp(query,'i').test(name)}catch{return name.toLowerCase().includes(query.toLowerCase())}
+    };
+    const visibleRows = query => {
+      if(query){
+        const matches=model.tree.filter(row=>matchesTree(row.name,query));
+        const byId=new Map(model.tree.map(row=>[row.id,row]));
+        const needed=new Set();
+        for(const match of matches){
+          let current=match;
+          while(current){needed.add(current.id);current=current.parentId?byId.get(current.parentId):undefined}
+        }
+        return model.tree.filter(row=>needed.has(row.id));
+      }
       const visible=[];const visibleDepth=new Map();
       for(const row of model.tree){
         const parentVisible=row.parentId===undefined||visibleDepth.get(row.parentId)===true;
@@ -544,15 +574,20 @@ function viewerHtml(
     };
     const renderTree = () => {
       const container=document.getElementById('treeRows');container.textContent='';
-      const query=search.value.trim().toLowerCase();
-      for(const row of visibleRows().filter(row=>!query||row.name.toLowerCase().includes(query))){
+      const query=search.value.trim();
+      const parentTotal=row=>treePercentMode.value==='parent'?(row.parentValue??model.total):model.total;
+      const rowPercent=(value,row)=>parentTotal(row)?(value/parentTotal(row)*100).toFixed(2)+'%':'0.00%';
+      document.getElementById('treeFlatPercent').textContent=treePercentMode.value==='parent'?'自身/父级':'自身占比';
+      document.getElementById('treeCumPercent').textContent=treePercentMode.value==='parent'?'累计/父级':'累计占比';
+      for(const row of visibleRows(query)){
         const element=document.createElement('div');element.className='tree-row';element.dataset.name=row.name;
+        if(matchesTree(row.name,query))element.classList.add('match');
         const guides='<span class="tree-guide"></span>'.repeat(Math.max(0,row.depth-1));
         const branch=row.depth?'<span class="tree-branch">└</span>':'';
-        element.innerHTML='<span class="function">'+guides+branch+'<button class="twisty" title="'+(row.hasChildren?'展开或折叠调用层级':'')+'">'+(row.hasChildren?(expanded.has(row.id)?'⌄':'›'):'')+'</button><span class="tree-name">'+escapeText(row.name)+'</span></span><span>'+format(row.flat)+'</span><span>'+percent(row.flat)+'</span><span>'+format(row.value)+'</span><span>'+percent(row.value)+'</span>';
+        element.innerHTML='<span class="function">'+guides+branch+'<button class="twisty" title="'+(row.hasChildren?'展开或折叠调用层级':'')+'">'+(row.hasChildren?(expanded.has(row.id)?'⌄':'›'):'')+'</button><span class="tree-name">'+escapeText(row.name)+'</span></span><span>'+format(row.flat)+'</span><span>'+rowPercent(row.flat,row)+'</span><span>'+format(row.value)+'</span><span>'+rowPercent(row.value,row)+'</span>';
         element.querySelector('.twisty').addEventListener('click',event=>{event.stopPropagation();if(row.hasChildren){expanded.has(row.id)?expanded.delete(row.id):expanded.add(row.id);renderTree()}});
-        element.addEventListener('click',()=>{choose(row.name);vscode.postMessage({command:'selected-function',functionName:row.name})});
-        element.addEventListener('dblclick',()=>vscode.postMessage({command:'open-function',functionName:row.name}));
+        element.addEventListener('click',()=>{choose(row.name);vscode.postMessage({command:'selected-function',functionName:row.name});if(treeSingleClick.checked)vscode.postMessage({command:'open-function',functionName:row.name})});
+        element.addEventListener('dblclick',()=>{if(!treeSingleClick.checked)vscode.postMessage({command:'open-function',functionName:row.name})});
         container.appendChild(element);
       }
       choose(selectedFunction);
@@ -562,6 +597,7 @@ function viewerHtml(
     sample.addEventListener('change',()=>vscode.postMessage({command:'change-sample',sampleType:sample.value}));
     more.addEventListener('change',()=>{if(more.value)setView(more.value)});
     search.addEventListener('input',()=>searchProfile(search.value));
+    treePercentMode.addEventListener('change',renderTree);
     frame.addEventListener('load',sendTheme);
     window.addEventListener('message',event=>{
       const message=event.data;
@@ -580,7 +616,7 @@ function viewerHtml(
             frame.src=iframeUrl();
           }else selection.textContent=message.functionName+' · 本次 Profile 没有可定位的图节点';
         }
-      }else if(message?.command==='focus-function'){choose(message.functionName);pendingFocus=false;if(currentView==='peek'||currentView==='source')frame.src=iframeUrl();else focus(message.functionName)}
+      }else if(message?.command==='focus-function'){choose(message.functionName);pendingFocus=false;if(currentView==='tree'){revealTreeSelection();renderTree()}else if(currentView==='peek'||currentView==='source')frame.src=iframeUrl();else focus(message.functionName)}
       else if(message?.command==='selection')choose(message.functionName);
     });
     document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>setView(tab.dataset.view)));

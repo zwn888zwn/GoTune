@@ -33,7 +33,8 @@ test('builds a value-sorted expandable tree with flat and cumulative costs', () 
   const rows = profileTreeRows(session());
   assert.deepEqual(rows.map((row) => row.name), ['main.main', 'main.work', 'main.small']);
   assert.equal(rows[0].hasChildren, true);
-  assert.equal(rows[1].parentId, rows[0].id);
+    assert.equal(rows[1].parentId, rows[0].id);
+    assert.equal(rows[1].parentValue, 100);
   assert.equal(rows[1].flat, 70);
   assert.equal(rows[1].value, 70);
 });
