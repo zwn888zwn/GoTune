@@ -9,6 +9,7 @@ export function createAgentSource(
   return `package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -16,6 +17,8 @@ import (
 	"net/http/pprof"
 	"os"
 	"runtime"
+	runtimepprof "runtime/pprof"
+	"sync"
 	"time"
 )
 
@@ -37,6 +40,38 @@ func init() {
 	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
 	mux.Handle("/debug/pprof/block", pprof.Handler("block"))
 	mux.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
+	var cpuMu sync.Mutex
+	var cpuBuffer bytes.Buffer
+	cpuRecording := false
+	mux.HandleFunc("/debug/gotune/cpu/start", func(w http.ResponseWriter, _ *http.Request) {
+		cpuMu.Lock()
+		defer cpuMu.Unlock()
+		if cpuRecording {
+			http.Error(w, "CPU recording is already running", http.StatusConflict)
+			return
+		}
+		cpuBuffer.Reset()
+		if err := runtimepprof.StartCPUProfile(&cpuBuffer); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		cpuRecording = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(\`{"recording":true}\`))
+	})
+	mux.HandleFunc("/debug/gotune/cpu/stop", func(w http.ResponseWriter, _ *http.Request) {
+		cpuMu.Lock()
+		defer cpuMu.Unlock()
+		if !cpuRecording {
+			http.Error(w, "CPU recording is not running", http.StatusConflict)
+			return
+		}
+		runtimepprof.StopCPUProfile()
+		cpuRecording = false
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(cpuBuffer.Bytes())
+		cpuBuffer.Reset()
+	})
 	mux.HandleFunc("/debug/gotune/runtime", func(w http.ResponseWriter, _ *http.Request) {
 		var stats runtime.MemStats
 		runtime.ReadMemStats(&stats)

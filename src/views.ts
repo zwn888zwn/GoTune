@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import { isRuntimeHotspot } from './classify';
 import {
   Hotspot,
   Investigation,
@@ -29,33 +28,14 @@ export class RunningItem extends vscode.TreeItem {
 
 export function runningItems(
   snapshot: RunnerSnapshot,
-  activeSession?: ProfileSession,
-  baselineSessionId?: string,
-  isApplicationSource: (filename: string) => boolean = () => true
+  cpuRecordingStartedAt?: number
 ): vscode.TreeItem[] {
-  const evidence = activeSession
-    ? [
-      new SessionItem(
-        activeSession,
-        activeSession.id === baselineSessionId ? 'baseline' : 'current'
-      ),
-      ...activeSession.hotspots
-        .filter((hotspot) =>
-          hotspot.location
-          && !isRuntimeHotspot(hotspot)
-          && isApplicationSource(hotspot.location.file)
-        )
-        .slice(0, 12)
-        .map((hotspot) => new HotspotItem(hotspot, activeSession))
-    ]
-    : [];
   if (snapshot.status === 'idle') {
     return [
       new RunningItem('分析当前函数', '在 pprof 中定位并查看调用关系', 'symbol-method', 'gotune.analyzeCurrentFunction'),
       new RunningItem('启动当前 Go main', '自动注入 pprof 并运行当前 main 包', 'run', 'gotune.runWithProfiler'),
       new RunningItem('连接 pprof 服务', '分析已经运行的 Go 进程', 'plug', 'gotune.fetchProfile'),
-      new RunningItem('导入 pprof 文件', '打开已有 CPU 或 Heap Profile', 'folder-opened', 'gotune.importProfile'),
-      ...evidence
+      new RunningItem('导入 pprof 文件', '打开已有 CPU 或 Heap Profile', 'folder-opened', 'gotune.importProfile')
     ];
   }
   if (snapshot.status === 'starting') {
@@ -70,12 +50,31 @@ export function runningItems(
   return [
     new RunningItem(snapshot.target?.importPath ?? 'Go 目标', `运行中 · PID ${snapshot.pid ?? '—'}`, 'vm-running'),
     new RunningItem('分析当前函数', '在 pprof 中定位并查看调用关系', 'symbol-method', 'gotune.analyzeCurrentFunction'),
-    new RunningItem('采集 CPU', '采集期间请触发需要分析的业务操作', 'flame', 'gotune.captureCpu'),
-    new RunningItem('采集当前存活内存', '强制 GC 后查看仍然存活的分配路径', 'database', 'gotune.captureHeap'),
-    ...evidence,
+    new RunningItem(
+      cpuRecordingStartedAt ? '停止 CPU 录制' : '开始 CPU 录制',
+      cpuRecordingStartedAt
+        ? `已录制 ${formatElapsed(Date.now() - cpuRecordingStartedAt)} · 停止后自动打开 Profile`
+        : '录制期间请触发需要分析的业务操作',
+      cpuRecordingStartedAt ? 'debug-stop' : 'record',
+      'gotune.captureCpu'
+    ),
+    new RunningItem('Heap（GC 后）', '强制 GC 后查看仍然存活的分配路径', 'database', 'gotune.captureHeap'),
+    new RunningItem('累计分配', '查看累计分配空间和对象数量', 'symbol-array', 'gotune.captureAllocations'),
+    new RunningItem('Goroutine', '查看当前 goroutine 调用栈', 'list-tree', 'gotune.captureGoroutines'),
+    new RunningItem('Heap（不 GC）', '不触发 GC，直接查看当前 Heap', 'database', 'gotune.captureHeapNoGc'),
+    new RunningItem('阻塞', '查看 goroutine 阻塞等待；需要启用竞争采样', 'debug-pause', 'gotune.captureBlock'),
+    new RunningItem('锁竞争', '查看 Mutex 竞争；需要启用竞争采样', 'lock', 'gotune.captureMutex'),
     new RunningItem('查看目标输出', undefined, 'output', 'gotune.showTargetOutput'),
     new RunningItem('停止目标', undefined, 'debug-stop', 'gotune.stopProfilerTarget')
   ];
+}
+
+function formatElapsed(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds / 60) % 60;
+  const remaining = seconds % 60;
+  return [hours, minutes, remaining].map((value) => String(value).padStart(2, '0')).join(':');
 }
 
 export class SessionItem extends vscode.TreeItem {

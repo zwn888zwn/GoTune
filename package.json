@@ -19,6 +19,8 @@
   "activationEvents": [
     "onLanguage:go",
     "onView:gotune.running",
+    "onView:gotune.liveView",
+    "onView:gotune.sessions",
     "onView:gotune.profileView"
   ],
   "main": "./out/extension.js",
@@ -55,6 +57,16 @@
         {
           "id": "gotune.running",
           "name": "性能分析"
+        },
+        {
+          "type": "webview",
+          "id": "gotune.liveView",
+          "name": "Live 运行趋势",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "gotune.sessions",
+          "name": "Profile 快照"
         }
       ],
       "gotuneOptimization": [
@@ -88,7 +100,7 @@
       },
       {
         "command": "gotune.captureCpu",
-        "title": "GoTune: 采集 CPU",
+        "title": "GoTune: 开始/停止 CPU 录制",
         "icon": "$(record)"
       },
       {
@@ -192,7 +204,7 @@
           "default": 10,
           "minimum": 1,
           "maximum": 300,
-          "description": "采集 CPU Profile 的持续时间。"
+          "description": "自动分析、累计分配和性能场景的默认采集时长；手动 CPU 录制使用开始/停止按钮。"
         },
         "gotune.runBuildFlags": {
           "type": "array",

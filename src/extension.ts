@@ -1,6 +1,8 @@
+import { execFile } from 'node:child_process';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as path from 'node:path';
+import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import { runGoBenchmark } from './benchmark';
 import { BenchmarkSnapshot, showBenchmarkPanel } from './benchmarkView';
@@ -45,6 +47,7 @@ import {
 } from './model';
 import { listProfileSampleTypes, parseProfile } from './profileParser';
 import { PprofViewer } from './pprofViewer';
+import { LiveMetricsView } from './liveMetricsView';
 import { buildProfileUrl } from './profileUrl';
 import { discoverMainPackages, MainPackage, ProfilerRunner, resolveMainPackage } from './runner';
 import { inspectStructLayout } from './structLayout';
@@ -90,6 +93,7 @@ let baselineSessionId: string | undefined;
 let activeInvestigationId: string | undefined;
 const memoryGrowthSessions: ProfileSession[] = [];
 const memoryGrowthObjectSessions: ProfileSession[] = [];
+const execFileAsync = promisify(execFile);
 
 const sessionsStorageKey = 'gotune.sessions.v1';
 const activeSessionStorageKey = 'gotune.activeSession.v1';
@@ -222,13 +226,17 @@ export function activate(context: vscode.ExtensionContext): void {
   const runner = new ProfilerRunner(targetOutput);
   const traceViewer = new TraceViewer(targetOutput);
   const pprofViewer = new PprofViewer(targetOutput);
+  const liveMetricsView = new LiveMetricsView();
   let runtimeOverviewPanel: vscode.WebviewPanel | undefined;
   let runtimeOverviewTimer: NodeJS.Timeout | undefined;
   let runtimeOverviewPolling = false;
+  let liveMetricsTimer: NodeJS.Timeout | undefined;
+  let liveMetricsPolling = false;
+  let cpuRecordingStartedAt: number | undefined;
   const goroutineTracker = new GoroutineTracker();
   const codeLensProvider = new HotspotCodeLensProvider();
   const runningProvider = new PerformanceTreeProvider<vscode.TreeItem>(() =>
-    runningItems(runner.snapshot, activeSession, baselineSessionId, isWorkspaceSourcePath)
+    runningItems(runner.snapshot, cpuRecordingStartedAt)
   );
   const sessionProvider = new PerformanceTreeProvider(() => sessions.map((session) => {
     const state = session.id === baselineSessionId
@@ -253,12 +261,7 @@ export function activate(context: vscode.ExtensionContext): void {
       sessions.find((session) => session.id === finding.captureId)
     ));
   });
-  const heatDecoration = vscode.window.createTextEditorDecorationType({
-    gutterIconPath: context.asAbsolutePath('resources/evidence.svg'),
-    gutterIconSize: 'contain',
-    overviewRulerColor: new vscode.ThemeColor('charts.orange'),
-    overviewRulerLane: vscode.OverviewRulerLane.Right
-  });
+  const heatDecoration = vscode.window.createTextEditorDecorationType({});
   const heatLabelDecoration = vscode.window.createTextEditorDecorationType({
     after: { color: new vscode.ThemeColor('editorCodeLens.foreground'), margin: '0 0 0 2rem' }
   });
@@ -278,6 +281,15 @@ export function activate(context: vscode.ExtensionContext): void {
         goroutineTracker.reset();
         memoryGrowthSessions.splice(0);
         closeRuntimeOverview();
+        if (liveMetricsTimer) clearInterval(liveMetricsTimer);
+        liveMetricsTimer = undefined;
+        liveMetricsPolling = false;
+        cpuRecordingStartedAt = undefined;
+        liveMetricsView.setCpuRecording(undefined);
+        liveMetricsView.setTargetActive(false);
+      } else if (snapshot.status === 'running') {
+        liveMetricsView.setTargetActive(true);
+        startLiveMetrics();
       }
       runningProvider.refresh();
       void vscode.commands.executeCommand('setContext', 'gotune.targetActive', snapshot.status !== 'idle');
@@ -310,6 +322,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.registerWebviewViewProvider(
       'gotune.profileView',
       pprofViewer,
+      { webviewOptions: { retainContextWhenHidden: true } }
+    ),
+    vscode.window.registerWebviewViewProvider(
+      'gotune.liveView',
+      liveMetricsView,
       { webviewOptions: { retainContextWhenHidden: true } }
     ),
     vscode.commands.registerCommand('gotune.importProfile', async () => {
@@ -537,16 +554,57 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     }),
     vscode.commands.registerCommand('gotune.captureCpu', async () => {
-      const seconds = vscode.workspace.getConfiguration('gotune').get<number>('captureCpuSeconds', 10);
-      void vscode.window.showInformationMessage(
-        `GoTune：请在接下来的 ${seconds} 秒内触发需要分析的业务操作。`
-      );
-      await captureManagedProfile(
-        `profile?seconds=${seconds}`,
-        'CPU 热点',
-        undefined,
-        seconds * 1000 + 15_000
-      );
+      if (!await ensureTargetRunningForCapture()) return;
+      const baseUrl = runner.snapshot.pprofUrl;
+      if (!baseUrl) return;
+      try {
+        if (!cpuRecordingStartedAt) {
+          await fetchBuffer(buildProfileUrl(baseUrl, '../gotune/cpu/start'));
+          cpuRecordingStartedAt = Date.now();
+          liveMetricsView.setCpuRecording(cpuRecordingStartedAt);
+          runningProvider.refresh();
+          void vscode.window.showInformationMessage(
+            'GoTune：CPU 录制已开始。执行需要分析的操作，完成后再次点击“停止 CPU 录制”。'
+          );
+          return;
+        }
+        const startedAt = cpuRecordingStartedAt;
+        const bytes = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: 'GoTune：正在停止 CPU 录制并生成 Profile',
+            cancellable: false
+          },
+          () => fetchBuffer(buildProfileUrl(baseUrl, '../gotune/cpu/stop'))
+        );
+        cpuRecordingStartedAt = undefined;
+        liveMetricsView.setCpuRecording(undefined);
+        runningProvider.refresh();
+        const timestamp = new Date().toLocaleTimeString();
+        const session = parseProfile(
+          bytes,
+          `CPU 热点 ${timestamp}`,
+          buildProfileUrl(baseUrl, '../gotune/cpu/stop'),
+          'cpu'
+        );
+        session.target = activeTargetIdentity();
+        session.processStartedAt = runner.snapshot.startedAt;
+        session.captureDurationMs = Date.now() - startedAt;
+        session.captureMode = 'delta';
+        session.scenarioId = currentInvestigation()?.scenarioId;
+        pprofViewer.registerProfile(session.id, bytes);
+        addSession(session, true);
+        if (session.total === 0) {
+          void vscode.window.showWarningMessage(
+            'GoTune：本次没有采集到 CPU 样本，请在录制期间触发实际业务操作。'
+          );
+        }
+      } catch (error) {
+        cpuRecordingStartedAt = undefined;
+        liveMetricsView.setCpuRecording(undefined);
+        runningProvider.refresh();
+        void vscode.window.showErrorMessage(`GoTune：CPU 录制失败：${errorMessage(error)}`);
+      }
     }),
     vscode.commands.registerCommand('gotune.showRuntimeOverview', async () => {
       const baseUrl = runner.snapshot.pprofUrl;
@@ -598,6 +656,17 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!memory) return;
       setActive(memory);
       void showSessionProfile(memory);
+    }),
+    vscode.commands.registerCommand('gotune.captureHeapNoGc', async () => {
+      const captured = await captureManagedProfiles(
+        'heap',
+        '当前 Heap（未强制 GC）',
+        ['inuse_space', 'inuse_objects'],
+        undefined,
+        false
+      );
+      const memory = captured.find((session) => session.sampleType === 'inuse_space');
+      if (memory) void showSessionProfile(memory);
     }),
     vscode.commands.registerCommand('gotune.checkMemoryGrowth', async () => {
       const sampleNumber = memoryGrowthSessions.length;
@@ -729,7 +798,7 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     }),
     vscode.commands.registerCommand('gotune.captureGoroutines', async () => {
-      await inspectGoroutines();
+      await captureManagedProfile('goroutine', 'Goroutine');
     }),
     vscode.commands.registerCommand('gotune.monitorGoroutines', async () => {
       if (runner.snapshot.status !== 'running' || !runner.snapshot.pprofUrl) {
@@ -2939,6 +3008,35 @@ export function activate(context: vscode.ExtensionContext): void {
     return statusAfterStart === 'running';
   }
 
+  function startLiveMetrics(): void {
+    if (liveMetricsTimer) return;
+    const refresh = async () => {
+      const snapshot = runner.snapshot;
+      if (
+        liveMetricsPolling
+        || snapshot.status !== 'running'
+        || !snapshot.pprofUrl
+      ) return;
+      liveMetricsPolling = true;
+      try {
+        const [bytes, cpuPercent] = await Promise.all([
+          fetchBuffer(buildProfileUrl(snapshot.pprofUrl, '../gotune/runtime')),
+          processCpuPercent(snapshot.pid)
+        ]);
+        const metrics = parseRuntimeMetrics(bytes);
+        if (cpuPercent !== undefined) metrics.cpuPercent = cpuPercent;
+        liveMetricsView.update(metrics);
+        if (cpuRecordingStartedAt) runningProvider.refresh();
+      } catch (error) {
+        targetOutput.appendLine(`[GoTune] Live metrics update failed: ${errorMessage(error)}`);
+      } finally {
+        liveMetricsPolling = false;
+      }
+    };
+    void refresh();
+    liveMetricsTimer = setInterval(() => void refresh(), 1000);
+  }
+
   async function restartTargetForVerification(
     enableContentionProfiles = Boolean(runner.snapshot.contentionProfilesEnabled)
   ): Promise<boolean> {
@@ -3534,9 +3632,6 @@ function applyProfileHeatToEditor(
       }
       return `${functionEvidenceKindLabel(kind)} ${percent.toFixed(1)}%`;
     });
-    const intensity = Math.max(...entries.map(({ session, metric }) =>
-      session.total ? Math.min(1, metric.value / session.total) : 0
-    ));
     const isHottest = entries.some((entry) => entry.rank < 3);
     const hover = new vscode.MarkdownString(
       `**${parts.join(' · ')}**\n\n`
@@ -3547,11 +3642,11 @@ function applyProfileHeatToEditor(
       hoverMessage: hover,
       renderOptions: {
         after: {
-          contentText: ` GoTune ${isHottest ? '🔥' : '·'} ${parts.join(' · ')}`,
+          contentText: ` ${isHottest ? '🔥 ' : ''}${parts.join(' · ')}`,
           color: new vscode.ThemeColor(
             isHottest ? 'charts.red' : 'editorCodeLens.foreground'
           ),
-          opacity: String(isHottest ? 1 : 0.45 + 0.35 * intensity)
+          opacity: String(isHottest ? 1 : 0.7)
         }
       }
     };
@@ -3907,6 +4002,25 @@ function parseRuntimeMetrics(bytes: Buffer): RuntimeMetrics {
     throw new Error('Profiler returned invalid runtime metrics');
   }
   return value as RuntimeMetrics;
+}
+
+async function processCpuPercent(pid: number | undefined): Promise<number | undefined> {
+  if (!pid || process.platform === 'win32') return undefined;
+  try {
+    const result = await execFileAsync('ps', ['-o', '%cpu=', '-g', String(pid)], {
+      timeout: 1000
+    });
+    const values = result.stdout
+      .trim()
+      .split(/\s+/)
+      .map(Number)
+      .filter(Number.isFinite);
+    return values.length > 0
+      ? values.reduce((sum, value) => sum + Math.max(0, value), 0)
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function delay(milliseconds: number): Promise<void> {

@@ -42,6 +42,19 @@ test('injects a non-invasive IDE bridge into official pprof HTML', () => {
   assert.match(bridged, /#content\.source/);
   assert.match(bridged, /addEventListener\('click'/);
   assert.match(bridged, /addEventListener\('dblclick'/);
+  assert.match(bridged, /centerGraphNode/);
+  assert.match(bridged, /graph-control/);
+  assert.match(bridged, /gotune-target/);
+  assert.match(bridged, /installTopSorting/);
+  assert.match(bridged, /gotune-flame-tooltip/);
+  assert.match(bridged, /gotune-tooltip-track/);
+  assert.match(bridged, /removeAttribute\('title'\)/);
+  assert.match(bridged, /installGraphPan/);
+  assert.match(bridged, /scrollbar-width:thin/);
+  assert.match(
+    bridged,
+    /message\.command === 'focus-function' && graphSvg\(\)/
+  );
   assert.ok(bridged.indexOf("addEventListener('dblclick'") < bridged.indexOf('</body>'));
   const script = /<script>([\s\S]+)<\/script>/.exec(bridged)?.[1];
   assert.ok(script);

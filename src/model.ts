@@ -162,6 +162,7 @@ export interface ProfileComparison {
 
 export interface RuntimeMetrics {
   timestamp: number;
+  cpuPercent?: number;
   heapAlloc: number;
   heapObjects: number;
   totalAlloc: number;

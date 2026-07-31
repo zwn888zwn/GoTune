@@ -41,6 +41,10 @@ export class PprofViewer implements vscode.Disposable, vscode.WebviewViewProvide
   private activeView: ProfileView = 'graph';
   private proxyUrl: string | undefined;
   private graphvizAvailable = true;
+  private graphNodeCount = 80;
+  private graphNodeFraction = 0.005;
+  private graphEdgeFraction = 0.001;
+  private graphCallTree = false;
   private options: OpenOptions | undefined;
   private selectedFunction = '';
 
@@ -157,6 +161,23 @@ export class PprofViewer implements vscode.Disposable, vscode.WebviewViewProvide
       }
     } else if (value.command === 'change-view' && isProfileView(value.view)) {
       this.activeView = value.view;
+    } else if (
+      value.command === 'change-graph-node-count'
+      && typeof value.nodeCount === 'number'
+      && [0, 80, 120, 300, 500].includes(value.nodeCount)
+    ) {
+      this.graphNodeCount = value.nodeCount;
+    } else if (
+      value.command === 'change-graph-config'
+      && typeof value.nodeCount === 'number'
+      && typeof value.nodeFraction === 'number'
+      && typeof value.edgeFraction === 'number'
+      && typeof value.callTree === 'boolean'
+    ) {
+      this.graphNodeCount = Math.max(0, Math.min(5000, Math.round(value.nodeCount)));
+      this.graphNodeFraction = Math.max(0, Math.min(1, value.nodeFraction));
+      this.graphEdgeFraction = Math.max(0, Math.min(1, value.edgeFraction));
+      this.graphCallTree = value.callTree;
     } else if (value.command === 'change-sample' && typeof value.sampleType === 'string') {
       const options = this.options;
       if (!options || options.session.sampleType === value.sampleType) return;
@@ -174,7 +195,7 @@ export class PprofViewer implements vscode.Disposable, vscode.WebviewViewProvide
   private render(): void {
     if (!this.view) return;
     if (!this.options || !this.proxyUrl) {
-      this.view.webview.html = emptyHtml(this.view.webview);
+      this.view.webview.html = emptyHtml();
       return;
     }
     const artifact = this.artifacts.get(this.options.session.id);
@@ -186,7 +207,11 @@ export class PprofViewer implements vscode.Disposable, vscode.WebviewViewProvide
       sampleTypes,
       this.activeView,
       this.selectedFunction,
-      this.graphvizAvailable
+      this.graphvizAvailable,
+      this.graphNodeCount,
+      this.graphNodeFraction,
+      this.graphEdgeFraction,
+      this.graphCallTree
     );
   }
 
@@ -332,12 +357,20 @@ function viewerHtml(
   sampleTypes: Array<{ name: string; unit: string }>,
   activeView: ProfileView,
   selectedFunction: string,
-  graphvizAvailable: boolean
+  graphvizAvailable: boolean,
+  graphNodeCount: number,
+  graphNodeFraction: number,
+  graphEdgeFraction: number,
+  graphCallTree: boolean
 ): string {
   const nonce = Math.random().toString(36).slice(2);
   const model = JSON.stringify({
     proxyUrl,
     activeView,
+    graphNodeCount,
+    graphNodeFraction,
+    graphEdgeFraction,
+    graphCallTree,
     selectedFunction,
     sampleType: session.sampleType,
     sampleTypes: sampleTypes.map((sample) => ({
@@ -355,18 +388,20 @@ function viewerHtml(
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; frame-src http://127.0.0.1:*; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style nonce="${nonce}">
-    *{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--vscode-panel-background,var(--vscode-editor-background));color:var(--vscode-foreground);font-family:var(--vscode-font-family);font-size:var(--vscode-font-size)}
-    body{display:flex;flex-direction:column;overflow:hidden}.toolbar{height:38px;display:flex;align-items:center;gap:6px;padding:4px 10px;border-bottom:1px solid var(--vscode-panel-border)}
-    .tabs{display:flex;gap:2px}.tab,.tool{border:0;border-radius:4px;padding:5px 9px;color:var(--vscode-foreground);background:transparent;cursor:pointer}.tab:hover,.tool:hover{background:var(--vscode-toolbar-hoverBackground)}.tab.active{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}
+    *{box-sizing:border-box;scrollbar-width:thin;scrollbar-color:var(--vscode-scrollbarSlider-background) transparent}html,body{height:100%;margin:0;background:var(--vscode-panel-background,var(--vscode-editor-background));color:var(--vscode-foreground);font-family:var(--vscode-font-family);font-size:var(--vscode-font-size)}::-webkit-scrollbar{width:7px;height:7px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--vscode-scrollbarSlider-background);border-radius:7px}::-webkit-scrollbar-corner{background:transparent}
+    body{display:flex;flex-direction:column;overflow:hidden}.toolbar{height:40px;display:flex;align-items:center;gap:6px;padding:4px 10px;border-bottom:1px solid var(--vscode-panel-border);background:var(--vscode-editorGroupHeader-tabsBackground)}
+    .tabs{display:flex;gap:2px}.tab,.tool{border:0;border-radius:4px;padding:5px 9px;color:var(--vscode-foreground);background:transparent;cursor:pointer}.tab:hover,.tool:hover{background:var(--vscode-toolbar-hoverBackground)}.tab.active{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}.tool.primary{color:var(--vscode-button-foreground);background:var(--vscode-button-background)}
     .spacer{flex:1}.metric{display:flex;align-items:center;gap:6px;color:var(--vscode-descriptionForeground)}select{color:var(--vscode-dropdown-foreground);background:var(--vscode-dropdown-background);border:1px solid var(--vscode-dropdown-border);padding:4px 7px}
     .search{width:180px;min-width:90px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border);padding:4px 7px}
     .selection{max-width:30%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--vscode-descriptionForeground)}
     .warning{padding:5px 10px;background:var(--vscode-inputValidation-warningBackground);color:var(--vscode-inputValidation-warningForeground)}
     main{position:relative;flex:1;min-height:0}.view{position:absolute;inset:0}iframe{width:100%;height:100%;border:0;background:var(--vscode-editor-background)}
-    #tree{overflow:auto}.tree-header,.tree-row{display:grid;grid-template-columns:minmax(300px,1fr) 110px 90px 120px 110px;min-width:760px;align-items:center;border-bottom:1px solid var(--vscode-panel-border)}
-    .tree-header{position:sticky;top:0;z-index:2;background:var(--vscode-editorGroupHeader-tabsBackground);font-weight:600}.tree-header span,.tree-row span{padding:5px 8px;text-align:right}.tree-header span:first-child,.tree-row span:first-child{text-align:left}
-    .tree-row{cursor:default}.tree-row:hover{background:var(--vscode-list-hoverBackground)}.tree-row.selected{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}
-    .function{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.twisty{display:inline-block;width:16px;text-align:center}.empty{padding:24px;color:var(--vscode-descriptionForeground)}
+    .graph-tools{position:absolute;z-index:3;left:10px;top:10px;display:flex;flex-direction:column;gap:4px}.graph-tools[hidden]{display:none!important}.graph-tools button{width:30px;height:30px;border:1px solid var(--vscode-button-border,transparent);border-radius:4px;color:var(--vscode-foreground);background:var(--vscode-editorWidget-background);box-shadow:0 2px 7px rgba(0,0,0,.25);cursor:pointer}.graph-tools button:hover{background:var(--vscode-toolbar-hoverBackground)}
+    .config-wrap{position:relative}.config-panel{position:absolute;z-index:20;top:35px;right:0;width:280px;padding:14px;border:1px solid var(--vscode-widget-border,var(--vscode-panel-border));border-radius:8px;background:var(--vscode-editorWidget-background);box-shadow:0 8px 24px rgba(0,0,0,.35)}.config-panel[hidden]{display:none}.config-title{font-weight:600;font-size:14px;margin-bottom:12px}.config-row{display:grid;grid-template-columns:1fr 110px;align-items:center;gap:10px;margin:9px 0}.config-row input{width:100%;padding:5px 7px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border)}.config-check{display:flex;align-items:center;gap:8px;margin:12px 0}.config-actions{display:flex;justify-content:flex-end;gap:7px;padding-top:11px;border-top:1px solid var(--vscode-panel-border)}
+    #tree{overflow:auto}.tree-header,.tree-row{display:grid;grid-template-columns:minmax(360px,1fr) 110px 90px 120px 110px;min-width:820px;align-items:stretch;border-bottom:1px solid var(--vscode-panel-border)}
+    .tree-header{position:sticky;top:0;z-index:2;background:var(--vscode-editorGroupHeader-tabsBackground);font-weight:600}.tree-header>span,.tree-row>span{padding:5px 8px;text-align:right;display:flex;align-items:center;justify-content:flex-end}.tree-header>span:first-child,.tree-row>span:first-child{text-align:left;justify-content:flex-start}
+    .tree-row{cursor:default;min-height:29px}.tree-row:hover{background:var(--vscode-list-hoverBackground)}.tree-row.selected{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}
+    .function{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tree-guide{align-self:stretch;flex:0 0 16px;border-left:1px solid var(--vscode-tree-indentGuidesStroke,var(--vscode-panel-border));opacity:.8}.tree-branch{flex:0 0 14px;color:var(--vscode-tree-indentGuidesStroke,var(--vscode-descriptionForeground))}.twisty{flex:0 0 18px;width:18px;height:18px;margin-right:3px;padding:0;border:0;border-radius:3px;color:inherit;background:transparent;line-height:16px;cursor:pointer}.twisty:hover{background:var(--vscode-toolbar-hoverBackground)}.tree-name{overflow:hidden;text-overflow:ellipsis}.empty{padding:24px;color:var(--vscode-descriptionForeground)}
   </style>
 </head>
 <body>
@@ -387,10 +422,26 @@ function viewerHtml(
     <span class="selection" id="selection"></span>
     <span class="spacer"></span>
     <input class="search" id="search" placeholder="搜索函数（正则）">
+    <div class="config-wrap">
+      <button class="tool" id="configure" title="配置调用图">⚙ Graph 配置</button>
+      <div class="config-panel" id="configPanel" hidden>
+        <div class="config-title">调用图显示</div>
+        <label class="config-row"><span>节点数</span><input id="configNodeCount" type="number" min="0" max="5000"></label>
+        <label class="config-row"><span>节点阈值</span><input id="configNodeFraction" type="number" min="0" max="1" step="0.001"></label>
+        <label class="config-row"><span>边阈值</span><input id="configEdgeFraction" type="number" min="0" max="1" step="0.001"></label>
+        <label class="config-check"><input id="configCallTree" type="checkbox"><span>按调用路径拆分同名函数</span></label>
+        <div class="config-actions"><button class="tool" id="configReset">恢复默认</button><button class="tool primary" id="configApply">应用</button></div>
+      </div>
+    </div>
     <label class="metric">显示：<select id="sample"></select></label>
   </div>
   ${graphvizAvailable ? '' : '<div class="warning">未找到 Graphviz dot。安装 Graphviz 后才能查看 Graph；Top、火焰图和 Tree 不受影响。</div>'}
   <main>
+    <div class="graph-tools" id="graphTools">
+      <button data-action="zoom-in" title="放大">＋</button>
+      <button data-action="zoom-out" title="缩小">−</button>
+      <button data-action="fit" title="适配整个调用图">↔</button>
+    </div>
     <iframe id="official" class="view"></iframe>
     <div id="tree" class="view" hidden>
       <div class="tree-header"><span>函数</span><span>自身</span><span>自身占比</span><span>累计</span><span>累计占比</span></div>
@@ -407,15 +458,29 @@ function viewerHtml(
     const selection = document.getElementById('selection');
     const open = document.getElementById('open');
     const search = document.getElementById('search');
+    const configure = document.getElementById('configure');
+    const configPanel = document.getElementById('configPanel');
+    const configNodeCount = document.getElementById('configNodeCount');
+    const configNodeFraction = document.getElementById('configNodeFraction');
+    const configEdgeFraction = document.getElementById('configEdgeFraction');
+    const configCallTree = document.getElementById('configCallTree');
     let currentView = model.activeView;
     let selectedFunction = model.selectedFunction;
-    let expanded = new Set(model.tree.filter(row => row.depth < 2).map(row => row.id));
+    let pendingFocus = Boolean(model.selectedFunction);
+    let graphNodeCount = model.graphNodeCount;
+    let graphNodeFraction = model.graphNodeFraction;
+    let graphEdgeFraction = model.graphEdgeFraction;
+    let graphCallTree = model.graphCallTree;
+    let graphLocateExpanded = false;
+    let expanded = new Set();
     const colors = {
       bg:getComputedStyle(document.body).getPropertyValue('--vscode-editor-background').trim(),
       fg:getComputedStyle(document.body).getPropertyValue('--vscode-foreground').trim(),
       header:getComputedStyle(document.body).getPropertyValue('--vscode-editorGroupHeader-tabsBackground').trim(),
       border:getComputedStyle(document.body).getPropertyValue('--vscode-panel-border').trim(),
-      hover:getComputedStyle(document.body).getPropertyValue('--vscode-list-hoverBackground').trim()
+      hover:getComputedStyle(document.body).getPropertyValue('--vscode-list-hoverBackground').trim(),
+      muted:getComputedStyle(document.body).getPropertyValue('--vscode-descriptionForeground').trim(),
+      selection:getComputedStyle(document.body).getPropertyValue('--vscode-focusBorder').trim()
     };
     const format = value => {
       if (model.unit === 'bytes') {
@@ -436,6 +501,12 @@ function viewerHtml(
     const iframeUrl = () => {
       const params=new URLSearchParams({si:sample.value});
       if((currentView==='peek'||currentView==='source')&&selectedFunction)params.set('f',selectedFunction);
+      if(currentView==='graph'){
+        params.set('n',String(graphNodeCount));
+        params.set('nf',String(graphNodeFraction));
+        params.set('ef',String(graphEdgeFraction));
+        if(graphCallTree)params.set('calltree','true');
+      }
       return model.proxyUrl + viewPath(currentView) + '?' + params.toString();
     };
     const sendTheme = () => frame.contentWindow?.postMessage({source:'gotune-host',command:'theme',colors},'*');
@@ -448,6 +519,7 @@ function viewerHtml(
       frame.contentWindow?.postMessage({source:'gotune-host',command:'search',query},'*');
     };
     const choose = name => {
+      if(selectedFunction!==(name||''))graphLocateExpanded=false;
       selectedFunction=name||'';selection.textContent=selectedFunction;open.disabled=!selectedFunction;
       document.querySelectorAll('.tree-row').forEach(row=>row.classList.toggle('selected',row.dataset.name===selectedFunction));
     };
@@ -456,7 +528,9 @@ function viewerHtml(
       document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.view===view));
       more.value=view==='peek'||view==='source'?view:'';
       tree.hidden=view!=='tree';frame.hidden=view==='tree';
-      if(view==='tree')renderTree();else frame.src=iframeUrl();
+      document.getElementById('graphTools').hidden=view!=='graph';
+      configure.hidden=view!=='graph';
+      if(view==='tree')renderTree();else{pendingFocus=Boolean(selectedFunction);frame.src=iframeUrl()}
       vscode.postMessage({command:'change-view',view});
     };
     const visibleRows = () => {
@@ -473,8 +547,11 @@ function viewerHtml(
       const query=search.value.trim().toLowerCase();
       for(const row of visibleRows().filter(row=>!query||row.name.toLowerCase().includes(query))){
         const element=document.createElement('div');element.className='tree-row';element.dataset.name=row.name;
-        element.innerHTML='<span class="function" style="padding-left:'+(8+row.depth*16)+'px"><span class="twisty">'+(row.hasChildren?(expanded.has(row.id)?'⌄':'›'):'')+'</span>'+escapeText(row.name)+'</span><span>'+format(row.flat)+'</span><span>'+percent(row.flat)+'</span><span>'+format(row.value)+'</span><span>'+percent(row.value)+'</span>';
-        element.addEventListener('click',()=>{if(row.hasChildren){expanded.has(row.id)?expanded.delete(row.id):expanded.add(row.id);renderTree()}choose(row.name);vscode.postMessage({command:'selected-function',functionName:row.name})});
+        const guides='<span class="tree-guide"></span>'.repeat(Math.max(0,row.depth-1));
+        const branch=row.depth?'<span class="tree-branch">└</span>':'';
+        element.innerHTML='<span class="function">'+guides+branch+'<button class="twisty" title="'+(row.hasChildren?'展开或折叠调用层级':'')+'">'+(row.hasChildren?(expanded.has(row.id)?'⌄':'›'):'')+'</button><span class="tree-name">'+escapeText(row.name)+'</span></span><span>'+format(row.flat)+'</span><span>'+percent(row.flat)+'</span><span>'+format(row.value)+'</span><span>'+percent(row.value)+'</span>';
+        element.querySelector('.twisty').addEventListener('click',event=>{event.stopPropagation();if(row.hasChildren){expanded.has(row.id)?expanded.delete(row.id):expanded.add(row.id);renderTree()}});
+        element.addEventListener('click',()=>{choose(row.name);vscode.postMessage({command:'selected-function',functionName:row.name})});
         element.addEventListener('dblclick',()=>vscode.postMessage({command:'open-function',functionName:row.name}));
         container.appendChild(element);
       }
@@ -485,17 +562,48 @@ function viewerHtml(
     sample.addEventListener('change',()=>vscode.postMessage({command:'change-sample',sampleType:sample.value}));
     more.addEventListener('change',()=>{if(more.value)setView(more.value)});
     search.addEventListener('input',()=>searchProfile(search.value));
-    frame.addEventListener('load',()=>{sendTheme();selectedFunction?focus(selectedFunction):searchProfile(search.value)});
+    frame.addEventListener('load',sendTheme);
     window.addEventListener('message',event=>{
       const message=event.data;
       if(message?.source==='gotune-pprof'){
         if(message.command==='selected-function')choose(message.functionName);
         else if(message.command==='open-function'||message.command==='open-source')vscode.postMessage(message);
-        else if(message.command==='ready'){sendTheme();selectedFunction?focus(selectedFunction):searchProfile(search.value)}
-      }else if(message?.command==='focus-function'){choose(message.functionName);if(currentView==='peek'||currentView==='source')frame.src=iframeUrl();else focus(message.functionName)}
+        else if(message.command==='ready'){sendTheme();if(pendingFocus&&selectedFunction){pendingFocus=false;focus(selectedFunction)}else searchProfile(search.value)}
+        else if(message.command==='focus-missed'&&currentView==='graph'){
+          if(!graphLocateExpanded){
+            graphLocateExpanded=true;
+            graphNodeCount=Math.max(graphNodeCount,500);
+            graphNodeFraction=0;
+            graphEdgeFraction=0;
+            pendingFocus=true;
+            selection.textContent=message.functionName+' · 正在展开调用图定位';
+            frame.src=iframeUrl();
+          }else selection.textContent=message.functionName+' · 本次 Profile 没有可定位的图节点';
+        }
+      }else if(message?.command==='focus-function'){choose(message.functionName);pendingFocus=false;if(currentView==='peek'||currentView==='source')frame.src=iframeUrl();else focus(message.functionName)}
       else if(message?.command==='selection')choose(message.functionName);
     });
     document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>setView(tab.dataset.view)));
+    document.querySelectorAll('#graphTools button').forEach(button=>button.addEventListener('click',()=>frame.contentWindow?.postMessage({source:'gotune-host',command:'graph-control',action:button.dataset.action},'*')));
+    const syncGraphConfig=()=>{
+      configNodeCount.value=String(graphNodeCount);
+      configNodeFraction.value=String(graphNodeFraction);
+      configEdgeFraction.value=String(graphEdgeFraction);
+      configCallTree.checked=graphCallTree;
+    };
+    configure.addEventListener('click',event=>{event.stopPropagation();configPanel.hidden=!configPanel.hidden;syncGraphConfig()});
+    configPanel.addEventListener('click',event=>event.stopPropagation());
+    document.addEventListener('click',()=>configPanel.hidden=true);
+    document.getElementById('configReset').addEventListener('click',()=>{graphNodeCount=80;graphNodeFraction=.005;graphEdgeFraction=.001;graphCallTree=false;syncGraphConfig()});
+    document.getElementById('configApply').addEventListener('click',()=>{
+      graphNodeCount=Math.max(0,Math.min(5000,Number(configNodeCount.value)||0));
+      graphNodeFraction=Math.max(0,Math.min(1,Number(configNodeFraction.value)||0));
+      graphEdgeFraction=Math.max(0,Math.min(1,Number(configEdgeFraction.value)||0));
+      graphCallTree=configCallTree.checked;
+      graphLocateExpanded=false;configPanel.hidden=true;pendingFocus=false;
+      vscode.postMessage({command:'change-graph-config',nodeCount:graphNodeCount,nodeFraction:graphNodeFraction,edgeFraction:graphEdgeFraction,callTree:graphCallTree});
+      frame.src=iframeUrl();
+    });
     document.getElementById('locate').addEventListener('click',()=>vscode.postMessage({command:'locate-current-function'}));
     open.addEventListener('click',()=>{if(selectedFunction)vscode.postMessage({command:'open-function',functionName:selectedFunction})});
     choose(selectedFunction);setView(currentView);
@@ -504,9 +612,8 @@ function viewerHtml(
 </html>`;
 }
 
-function emptyHtml(webview: vscode.Webview): string {
-  const nonce = Math.random().toString(36).slice(2);
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'"><style nonce="${nonce}">body{padding:20px;color:var(--vscode-descriptionForeground);background:var(--vscode-panel-background,var(--vscode-editor-background));font-family:var(--vscode-font-family)}h2{color:var(--vscode-foreground)}</style></head><body><h2>Profiling with pprof</h2><p>启动 Go 程序并采集 CPU 或内存 Profile，结果会显示在这里。</p><p>也可以从 GoTune 左侧面板导入已有的 pprof 文件。</p></body></html>`;
+function emptyHtml(): string {
+  return `<!doctype html><html><body style="margin:0;padding:28px;color:var(--vscode-descriptionForeground);background:var(--vscode-panel-background,var(--vscode-editor-background));font-family:var(--vscode-font-family)">从左侧采集或选择一个 Profile 后，这里显示 Top、Graph、Flame Graph 和 Tree。</body></html>`;
 }
 
 function sampleTypeLabel(sampleType: string): string {

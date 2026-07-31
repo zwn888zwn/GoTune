@@ -18,6 +18,10 @@ test('generates an isolated token-protected pprof agent', () => {
   assert.match(source, /GOTUNE_PPROF=http:\/\/"/);
   assert.match(source, /\/debug\/gotune\/runtime/);
   assert.match(source, /runtime\.ReadMemStats/);
+  assert.match(source, /\/debug\/gotune\/cpu\/start/);
+  assert.match(source, /runtimepprof\.StartCPUProfile/);
+  assert.match(source, /\/debug\/gotune\/cpu\/stop/);
+  assert.match(source, /runtimepprof\.StopCPUProfile/);
   assert.doesNotMatch(source, /DefaultServeMux/);
 });
 
