@@ -176,13 +176,16 @@ function pprofBridgeScript(): string {
   };
   let initialGraphViewBox;
   let graphOverviewApplied = false;
+  let graphDragEndedAt = 0;
   const graphSvg = () => document.querySelector('#graph svg');
   const installGraphPan = (svg) => {
     if (!svg || svg.dataset.gotunePan) return;
     svg.dataset.gotunePan = 'ready';
+    svg.style.cursor = 'grab';
+    svg.style.touchAction = 'none';
     let drag;
-    svg.addEventListener('pointerdown', (event) => {
-      if (event.button !== 2 && !event.ctrlKey) return;
+    const pointerDown = (event) => {
+      if (!event.target.closest?.('#graph') || event.button < 0 || event.button > 2) return;
       const view = svg.viewBox.baseVal;
       drag = {
         x: event.clientX,
@@ -190,22 +193,73 @@ function pprofBridgeScript(): string {
         viewX: view.x,
         viewY: view.y,
         width: view.width,
-        height: view.height
+        height: view.height,
+        moved: false
       };
       svg.setPointerCapture(event.pointerId);
+      svg.style.cursor = 'grabbing';
       event.preventDefault();
-    });
-    svg.addEventListener('pointermove', (event) => {
+      event.stopImmediatePropagation();
+    };
+    const pointerMove = (event) => {
       if (!drag) return;
+      if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 3) {
+        drag.moved = true;
+      }
       const view = svg.viewBox.baseVal;
       view.x = drag.viewX - (event.clientX - drag.x) * drag.width / Math.max(1, svg.clientWidth);
       view.y = drag.viewY - (event.clientY - drag.y) * drag.height / Math.max(1, svg.clientHeight);
-    });
-    const stop = () => {
-      drag = undefined;
+      event.preventDefault();
+      event.stopImmediatePropagation();
     };
-    svg.addEventListener('pointerup', stop);
-    svg.addEventListener('pointercancel', stop);
+    const stop = (event) => {
+      if (!drag) return;
+      if (drag.moved) graphDragEndedAt = Date.now();
+      drag = undefined;
+      svg.style.cursor = 'grab';
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    const wheel = (event) => {
+      if (!event.target.closest?.('#graph')) return;
+      const view = svg.viewBox.baseVal;
+      const modeScale = event.deltaMode === 1 ? 16
+        : event.deltaMode === 2 ? Math.max(1, svg.clientHeight) : 1;
+      let deltaX = event.deltaX * modeScale;
+      let deltaY = event.deltaY * modeScale;
+      if (event.shiftKey && deltaX === 0) {
+        deltaX = deltaY;
+        deltaY = 0;
+      }
+      if (event.ctrlKey || event.metaKey) {
+        const point = svg.createSVGPoint();
+        point.x = event.clientX;
+        point.y = event.clientY;
+        const screenMatrix = svg.getScreenCTM();
+        const anchor = screenMatrix ? point.matrixTransform(screenMatrix.inverse()) : {
+          x: view.x + view.width / 2,
+          y: view.y + view.height / 2
+        };
+        const requested = Math.exp(Math.max(-100, Math.min(100, deltaY)) * .0015);
+        const initial = initialGraphViewBox || { width: view.width };
+        const nextWidth = Math.max(initial.width * .03, Math.min(initial.width * 4, view.width * requested));
+        const factor = nextWidth / view.width;
+        view.x = anchor.x - (anchor.x - view.x) * factor;
+        view.y = anchor.y - (anchor.y - view.y) * factor;
+        view.width *= factor;
+        view.height *= factor;
+      } else {
+        view.x += deltaX * 1.35 * view.width / Math.max(1, svg.clientWidth);
+        view.y += deltaY * view.height / Math.max(1, svg.clientHeight);
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    window.addEventListener('pointerdown', pointerDown, true);
+    window.addEventListener('pointermove', pointerMove, true);
+    window.addEventListener('pointerup', stop, true);
+    window.addEventListener('pointercancel', stop, true);
+    window.addEventListener('wheel', wheel, { capture: true, passive: false });
     svg.addEventListener('contextmenu', (event) => event.preventDefault());
   };
   const rememberGraphViewBox = () => {
@@ -275,7 +329,7 @@ function pprofBridgeScript(): string {
       box.height = initialGraphViewBox.height;
       return;
     }
-    const factor = action === 'zoom-in' ? 0.78 : action === 'zoom-out' ? 1.28 : 1;
+    const factor = action === 'zoom-in' ? 0.88 : action === 'zoom-out' ? 1.14 : 1;
     const centerX = box.x + box.width / 2;
     const centerY = box.y + box.height / 2;
     box.width *= factor;
@@ -358,6 +412,11 @@ function pprofBridgeScript(): string {
   };
   const functionAt = (target) => topFunction(target) || graphFunction(target) || flameFunction(target);
   document.addEventListener('click', (event) => {
+    if (Date.now() - graphDragEndedAt < 100) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
     const functionName = functionAt(event.target);
     if (!functionName) return;
     host({ command: 'selected-function', functionName });
