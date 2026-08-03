@@ -183,7 +183,6 @@ function pprofBridgeScript(): string {
   };
   let initialGraphViewBox;
   let graphDragEndedAt = 0;
-  let graphClickTimer;
   let flameClickTimer;
   let flameSingleClick = false;
   const graphSvg = () => document.querySelector('#graph svg');
@@ -194,7 +193,9 @@ function pprofBridgeScript(): string {
     svg.style.touchAction = 'none';
     let drag;
     const pointerDown = (event) => {
-      if (!event.target.closest?.('#graph') || event.button < 0 || event.button > 2) return;
+      const canPan = event.button === 2
+        || (event.button === 0 && (event.ctrlKey || event.metaKey));
+      if (!event.target.closest?.('#graph') || !canPan) return;
       const view = svg.viewBox.baseVal;
       drag = {
         x: event.clientX,
@@ -529,15 +530,11 @@ function pprofBridgeScript(): string {
       event.stopImmediatePropagation();
       const functionName = graphFunction(graphNode);
       if (!functionName) return;
-      clearTimeout(graphClickTimer);
       host({ command: 'selected-function', functionName });
-      graphClickTimer = setTimeout(() => {
-        focusGraphNode(graphNode);
-      }, 350);
+      focusGraphNode(graphNode);
       return;
     }
     if (event.target.closest?.('#graph svg')) {
-      clearTimeout(graphClickTimer);
       clearGraphFocus();
       host({ command: 'selected-function', functionName: '' });
       return;
@@ -568,10 +565,8 @@ function pprofBridgeScript(): string {
     }
     const flameName = flameFunction(event.target);
     if (flameName) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
       clearTimeout(flameClickTimer);
-      setFlamePivot(flameName);
+      host({ command: 'selected-function', functionName: flameName });
       return;
     }
     if (topFunction(event.target)) return;
@@ -579,7 +574,6 @@ function pprofBridgeScript(): string {
     if (functionName) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      clearTimeout(graphClickTimer);
       host({ command: 'open-function', functionName });
     }
   }, true);

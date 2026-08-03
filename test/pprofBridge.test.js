@@ -67,11 +67,20 @@ test('injects a non-invasive IDE bridge into official pprof HTML', () => {
   assert.match(bridged, /flameSingleClick/);
   assert.match(bridged, /message\.command === 'flame-options'/);
   assert.match(bridged, /clearTimeout\(flameClickTimer\)/);
-  assert.match(bridged, /setFlamePivot\(flameName\)/);
   assert.doesNotMatch(bridged, /graphOverviewApplied/);
   assert.match(bridged, /focusGraphNode/);
   assert.match(bridged, /clearGraphFocus/);
-  assert.match(bridged, /clearTimeout\(graphClickTimer\);\s*clearGraphFocus\(\)/);
+  assert.match(bridged, /const canPan = event\.button === 2/);
+  assert.match(bridged, /event\.button === 0 && \(event\.ctrlKey \|\| event\.metaKey\)/);
+  assert.match(bridged, /host\(\{ command: 'selected-function', functionName \}\);\s*focusGraphNode\(graphNode\)/);
+  assert.doesNotMatch(bridged, /graphClickTimer/);
+  const doubleClickHandler = /addEventListener\('dblclick', \(event\) => \{([\s\S]*?)window\.addEventListener\('message'/.exec(bridged)?.[1];
+  assert.ok(doubleClickHandler);
+  assert.doesNotMatch(doubleClickHandler, /setFlamePivot\(flameName\)/);
+  assert.match(
+    doubleClickHandler,
+    /if \(flameName\) \{\s*clearTimeout\(flameClickTimer\);\s*host\(\{ command: 'selected-function', functionName: flameName \}\);\s*return;/
+  );
   assert.match(bridged, /host\(\{ command: 'selected-function', functionName: '' \}\)/);
   assert.match(bridged, /gotune-related/);
   assert.match(bridged, /search-results/);
