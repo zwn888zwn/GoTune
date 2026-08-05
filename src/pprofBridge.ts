@@ -14,6 +14,16 @@ export function pprofViewerUrl(output: string): string | undefined {
     .replace(/[),.;]+$/, '');
 }
 
+export function pprofGraphPath(
+  statusCode: number | undefined,
+  location: string | undefined
+): '/ui/' | '/ui/graph' {
+  return statusCode && statusCode >= 300 && statusCode < 400
+    && /(?:^|\/)flamegraph(?:\?|$)/.test(location ?? '')
+    ? '/ui/graph'
+    : '/ui/';
+}
+
 export function injectPprofBridge(html: string): string {
   const marker = '</body>';
   const script = `<script>${pprofBridgeScript()}</script>`;
@@ -127,6 +137,21 @@ function pprofBridgeScript(): string {
         }
       });
     });
+  };
+  const installTopSingleSelection = () => {
+    const table = document.getElementById('toptable');
+    if (!table) return;
+    const select = (event) => {
+      const row = event.target.closest?.('tr');
+      if (!row?.querySelector('td')) return;
+      table.querySelectorAll('tr.hilite,tr.hilite2')
+        .forEach((item) => item.classList.remove('hilite', 'hilite2'));
+      row.classList.add('hilite');
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    table.addEventListener('mousedown', select, true);
+    table.addEventListener('touchstart', select, true);
   };
   const flameTooltip = document.createElement('div');
   flameTooltip.id = 'gotune-flame-tooltip';
@@ -647,6 +672,7 @@ function pprofBridgeScript(): string {
   });
   rememberGraphViewBox();
   installTopSorting();
+  installTopSingleSelection();
   host({ command: 'ready', path: location.pathname, search: location.search });
 })();`;
 }

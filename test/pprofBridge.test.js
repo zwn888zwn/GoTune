@@ -1,10 +1,12 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const test = require('node:test');
 const {
   injectPprofBridge,
   pprofArguments,
+  pprofGraphPath,
   pprofViewerUrl
 } = require('../out/pprofBridge');
 
@@ -31,6 +33,11 @@ test('extracts the actual random pprof port from mixed tool output', () => {
   assert.equal(pprofViewerUrl('pprof failed before listening'), undefined);
 });
 
+test('uses the version-appropriate official pprof graph path', () => {
+  assert.equal(pprofGraphPath(200, undefined), '/ui/');
+  assert.equal(pprofGraphPath(301, 'flamegraph?n=1'), '/ui/graph');
+});
+
 test('injects a non-invasive IDE bridge into official pprof HTML', () => {
   const original = '<html><body><div id="toptable"></div></body></html>';
   const bridged = injectPprofBridge(original);
@@ -46,6 +53,9 @@ test('injects a non-invasive IDE bridge into official pprof HTML', () => {
   assert.match(bridged, /graph-control/);
   assert.match(bridged, /gotune-target/);
   assert.match(bridged, /installTopSorting/);
+  assert.match(bridged, /installTopSingleSelection/);
+  assert.match(bridged, /table\.querySelectorAll\('tr\.hilite,tr\.hilite2'\)/);
+  assert.match(bridged, /item\.classList\.remove\('hilite', 'hilite2'\)/);
   assert.match(bridged, /\^sum%\$/);
   assert.match(bridged, /sumPercentColumn/);
   assert.match(bridged, /gotune-flame-tooltip/);
@@ -107,4 +117,10 @@ test('injects a non-invasive IDE bridge into official pprof HTML', () => {
 
 test('still injects the bridge when pprof returns an HTML fragment', () => {
   assert.match(injectPprofBridge('<div>profile</div>'), /gotune-pprof/);
+});
+
+test('ignores stale iframe readiness from a different pprof view', () => {
+  const viewer = fs.readFileSync(require.resolve('../out/pprofViewer'), 'utf8');
+  assert.match(viewer, /view==='graph'\?model\.graphPath/);
+  assert.match(viewer, /if\(message\.path!==viewPath\(currentView\)\)return/);
 });

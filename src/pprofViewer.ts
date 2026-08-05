@@ -6,7 +6,12 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import { ProfileSession } from './model';
-import { injectPprofBridge, pprofArguments, pprofViewerUrl } from './pprofBridge';
+import {
+  injectPprofBridge,
+  pprofArguments,
+  pprofGraphPath,
+  pprofViewerUrl
+} from './pprofBridge';
 import { listProfileSampleTypes } from './profileParser';
 import { profileTreeRows } from './profileTree';
 import { shouldCreateProcessGroup, signalProcessTree } from './processTree';
@@ -39,6 +44,7 @@ export class PprofViewer implements vscode.Disposable, vscode.WebviewViewProvide
   private view: vscode.WebviewView | undefined;
   private activeSessionId: string | undefined;
   private activeView: ProfileView = 'graph';
+  private graphPath: '/ui/' | '/ui/graph' = '/ui/';
   private proxyUrl: string | undefined;
   private graphvizAvailable = true;
   private graphNodeCount = 80;
@@ -132,6 +138,7 @@ export class PprofViewer implements vscode.Disposable, vscode.WebviewViewProvide
           void this.stopCurrent();
         }
       });
+      this.graphPath = await detectPprofGraphPath(pprofUrl);
       this.proxyUrl = await this.startProxy(pprofUrl);
       this.graphvizAvailable = await hasGraphviz(options.environment);
       this.activeSessionId = options.session.id;
@@ -216,7 +223,8 @@ export class PprofViewer implements vscode.Disposable, vscode.WebviewViewProvide
       this.graphNodeCount,
       this.graphNodeFraction,
       this.graphEdgeFraction,
-      this.graphCallTree
+      this.graphCallTree,
+      this.graphPath
     );
   }
 
@@ -355,6 +363,32 @@ async function hasGraphviz(environment: Record<string, string>): Promise<boolean
   }
 }
 
+async function detectPprofGraphPath(pprofUrl: string): Promise<'/ui/' | '/ui/graph'> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (path: '/ui/' | '/ui/graph') => {
+      if (settled) return;
+      settled = true;
+      resolve(path);
+    };
+    const target = new URL('/ui/?n=1&nf=1&ef=1', pprofUrl);
+    const request = http.request(target, { method: 'HEAD' }, (response) => {
+      response.resume();
+      const location = response.headers.location;
+      finish(pprofGraphPath(
+        response.statusCode,
+        Array.isArray(location) ? location[0] : location
+      ));
+    });
+    request.once('error', () => finish('/ui/'));
+    request.setTimeout(5000, () => {
+      request.destroy();
+      finish('/ui/');
+    });
+    request.end();
+  });
+}
+
 function viewerHtml(
   webview: vscode.Webview,
   proxyUrl: string,
@@ -366,7 +400,8 @@ function viewerHtml(
   graphNodeCount: number,
   graphNodeFraction: number,
   graphEdgeFraction: number,
-  graphCallTree: boolean
+  graphCallTree: boolean,
+  graphPath: '/ui/' | '/ui/graph'
 ): string {
   const nonce = Math.random().toString(36).slice(2);
   const model = JSON.stringify({
@@ -377,6 +412,7 @@ function viewerHtml(
     graphNodeFraction,
     graphEdgeFraction,
     graphCallTree,
+    graphPath,
     selectedFunction,
     sampleType: session.sampleType,
     sampleTypes: sampleTypes.map((sample) => ({
@@ -547,7 +583,7 @@ function viewerHtml(
       }
       return new Intl.NumberFormat().format(value);
     };
-    const viewPath = view => view==='top'?'/ui/top':view==='flame'?'/ui/flamegraph':view==='peek'?'/ui/peek':view==='source'?'/ui/source':'/ui/';
+    const viewPath = view => view==='top'?'/ui/top':view==='graph'?model.graphPath:view==='flame'?'/ui/flamegraph':view==='peek'?'/ui/peek':view==='source'?'/ui/source':'';
     const iframeUrl = () => {
       const params=new URLSearchParams({si:sample.value});
       if((currentView==='peek'||currentView==='source')&&selectedFunction)params.set('f',selectedFunction);
@@ -719,7 +755,10 @@ function viewerHtml(
           flameSearchTotal=Number(message.total);
           updateSearchControls();
         }
-        else if(message.command==='ready'){sendFrameState();if(pendingFocus&&selectedFunction){pendingFocus=false;focus(selectedFunction)}else searchProfile(search.value)}
+        else if(message.command==='ready'){
+          if(message.path!==viewPath(currentView))return;
+          sendFrameState();if(pendingFocus&&selectedFunction){pendingFocus=false;focus(selectedFunction)}else searchProfile(search.value)
+        }
         else if(message.command==='focus-missed'&&currentView==='graph'){
           if(!graphLocateExpanded){
             graphLocateExpanded=true;
