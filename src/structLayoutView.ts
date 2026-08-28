@@ -1,63 +1,51 @@
 import * as vscode from 'vscode';
 import { StructLayoutField, StructLayoutResult } from './structLayout';
 
-export function showStructLayoutPanel(
-  result: StructLayoutResult,
-  onApply: () => void
-): void {
+export function showStructLayoutPanel(result: StructLayoutResult): void {
   const panel = vscode.window.createWebviewPanel(
     'gotune.structLayout',
-    `GoTune: ${result.name} layout`,
+    `GoTune: ${result.name} 结构体布局`,
     vscode.ViewColumn.Beside,
-    { enableScripts: true }
+    { enableScripts: false }
   );
-  const nonce = Math.random().toString(36).slice(2);
-  const saved = result.size - result.optimizedSize;
+  const sizeDifference = result.size - result.optimizedSize;
+  const currentPadding = totalPadding(result.fields);
+  const candidatePadding = totalPadding(result.optimizedFields);
+  const isModuleCache = /[\\/]pkg[\\/]mod[\\/]/.test(result.file);
   panel.webview.html = `<!doctype html>
 <html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'">
-<style nonce="${nonce}">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<style>
 body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);padding:20px}
-h1{font-size:20px}.cards{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}.card{min-width:150px;background:var(--vscode-editor-inactiveSelectionBackground);padding:10px 12px}.card strong{display:block;font-size:20px}
-.layout{display:grid;grid-template-columns:1fr 1fr;gap:18px}table{width:100%;border-collapse:collapse}th,td{text-align:right;padding:6px;border-bottom:1px solid var(--vscode-panel-border)}th:nth-child(2),td:nth-child(2){text-align:left}
-.warning{border-left:3px solid var(--vscode-editorWarning-foreground);padding:9px 12px;background:var(--vscode-textBlockQuote-background);margin:12px 0}
-button{border:0;padding:7px 11px;color:var(--vscode-button-foreground);background:var(--vscode-button-background)}button[disabled]{opacity:.5}
-pre{white-space:pre-wrap;background:var(--vscode-textCodeBlock-background);padding:12px}
+h1{font-size:20px}.cards{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}.card{min-width:145px;background:var(--vscode-editor-inactiveSelectionBackground);padding:10px 12px}.card strong{display:block;font-size:20px}
+.layout section{margin-top:24px}table{width:100%;border-collapse:collapse}th,td{text-align:right;padding:7px 8px;border-bottom:1px solid var(--vscode-panel-border)}th:nth-child(2),td:nth-child(2),th:nth-child(3),td:nth-child(3){text-align:left}.padding{color:var(--vscode-editorWarning-foreground);font-weight:600}
+.notice{border-left:3px solid var(--vscode-charts-blue);padding:9px 12px;background:var(--vscode-textBlockQuote-background);margin:12px 0}.warning{border-left-color:var(--vscode-editorWarning-foreground)}
+.path,.note{color:var(--vscode-descriptionForeground);font-size:12px}.path{word-break:break-all}pre{white-space:pre-wrap;background:var(--vscode-textCodeBlock-background);padding:12px}
 </style></head><body>
-<h1>${escapeHtml(result.name)} field layout</h1>
-<div>${escapeHtml(result.file)}:${result.line}</div>
+<h1>${escapeHtml(result.name)} 结构体内存布局</h1>
+<div class="path">${escapeHtml(result.file)}:${result.line}</div>
 <div class="cards">
-  <div class="card"><strong>${result.size} B</strong><span>Current size</span></div>
-  <div class="card"><strong>${result.optimizedSize} B</strong><span>Suggested size</span></div>
-  <div class="card"><strong>${saved} B</strong><span>Saved per object</span></div>
-  <div class="card"><strong>${formatBytes(saved * 100_000)}</strong><span>At 100,000 objects</span></div>
+  <div class="card"><strong>${result.size} B</strong><span>当前大小</span></div>
+  <div class="card"><strong>${currentPadding} B</strong><span>当前填充合计</span></div>
+  <div class="card"><strong>${result.optimizedSize} B</strong><span>候选顺序大小</span></div>
+  <div class="card"><strong>${sizeDifference} B</strong><span>大小差值</span></div>
 </div>
-${result.safetyReasons?.length ? `<div class="warning"><b>Preview only</b><br>${result.safetyReasons.map(escapeHtml).join('<br>')}</div>` : ''}
-<div class="layout"><section><h2>Current</h2>${layoutTable(result.fields)}</section>
-<section><h2>Suggested</h2>${layoutTable(result.optimizedFields)}</section></div>
-<p><button id="apply" ${!result.safeToApply || !result.optimizedSource || saved <= 0 ? 'disabled' : ''}>Apply safe field reorder</button></p>
-${result.optimizedSource ? `<details><summary>Preview exact rewritten source</summary><pre>${escapeHtml(result.optimizedSource)}</pre></details>` : ''}
-<script nonce="${nonce}">
-const vscode=acquireVsCodeApi();
-document.getElementById('apply')?.addEventListener('click',()=>vscode.postMessage({command:'apply'}));
-</script></body></html>`;
-  panel.webview.onDidReceiveMessage((message) => {
-    if (message?.command === 'apply' && result.safeToApply && result.optimizedSource) {
-      onApply();
-    }
-  });
+<div class="notice"><b>数据范围</b><br>以下是目标 GOARCH 下的原始 size、offset、alignment 和 padding。候选顺序仅按“零大小字段优先、对齐值降序、字段大小降序”计算，不代表应该修改代码。</div>
+<p class="note">本检查不分析缓存行、字段访问频率、伪共享、GC 扫描成本、实例数量或实际性能收益，也不会自动修改源码。</p>
+${isModuleCache ? '<div class="notice warning">这是 Go 模块缓存中的第三方依赖源码，仅展示布局数据。</div>' : ''}
+<div class="layout"><section><h2>当前布局</h2>${layoutTable(result.fields)}</section>
+<section><h2>候选重排布局</h2><p class="note">候选填充合计：${candidatePadding} B</p>${layoutTable(result.optimizedFields)}</section></div>
+</body></html>`;
+}
+
+function totalPadding(fields: StructLayoutField[]): number {
+  return fields.reduce((sum, field) => sum + field.padding, 0);
 }
 
 function layoutTable(fields: StructLayoutField[]): string {
-  return `<table><thead><tr><th>Offset</th><th>Field</th><th>Type</th><th>Size</th><th>Padding</th></tr></thead><tbody>
-${fields.map((field) => `<tr><td>${field.offset}</td><td>${escapeHtml(field.name)}</td><td>${escapeHtml(field.type)}</td><td>${field.size}</td><td>${field.padding}</td></tr>`).join('')}
+  return `<table><thead><tr><th>偏移</th><th>字段</th><th>类型</th><th>大小</th><th>对齐</th><th>后置填充</th></tr></thead><tbody>
+${fields.map((field) => `<tr><td>${field.offset}</td><td>${escapeHtml(field.name)}</td><td>${escapeHtml(field.type)}</td><td>${field.size}</td><td>${field.align}</td><td class="${field.padding ? 'padding' : ''}">${field.padding}</td></tr>`).join('')}
 </tbody></table>`;
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(2)} KiB`;
-  return `${(value / 1024 / 1024).toFixed(2)} MiB`;
 }
 
 function escapeHtml(value: string): string {

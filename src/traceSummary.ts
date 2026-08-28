@@ -28,8 +28,8 @@ export function createTraceSummary(
       const top = session.hotspots
         .filter((hotspot) => hotspot.cumulative > 0)
         .sort((left, right) =>
-          Number(Boolean(right.location)) - Number(Boolean(left.location))
-          || right.cumulative - left.cumulative
+          right.cumulative - left.cumulative
+          || Number(Boolean(right.location)) - Number(Boolean(left.location))
         )[0];
       return {
         kind,

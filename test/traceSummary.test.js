@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createTraceSummary } = require('../out/traceSummary');
 
-test('summarizes trace delay without converting aggregate delay to wall time', () => {
+test('summarizes trace delay and keeps the true top aggregate path', () => {
   const session = {
     id: 'sync',
     name: 'sync',
@@ -30,6 +30,6 @@ test('summarizes trace delay without converting aggregate delay to wall time', (
 
   assert.equal(summary.captureDurationMs, 1000);
   assert.equal(summary.entries[0].total, 4_000_000_000);
-  assert.equal(summary.entries[0].top.name, 'main.wait');
-  assert.equal(summary.entries[0].top.percent, 75);
+  assert.equal(summary.entries[0].top.name, 'runtime.gopark');
+  assert.equal(summary.entries[0].top.percent, 100);
 });

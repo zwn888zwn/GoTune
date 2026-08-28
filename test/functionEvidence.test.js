@@ -95,6 +95,16 @@ test('falls back to the Go symbol name when source paths are unavailable', () =>
   assert.equal(findFunctionHotspot(fn, profile).name, 'main.work');
 });
 
+test('does not guess when a source-less symbol name is ambiguous', () => {
+  const profile = session('cpu', 'cpu', 10, 20);
+  profile.hotspots = [
+    { ...profile.hotspots[0], location: undefined },
+    { ...profile.hotspots[0], id: 'other', name: 'other.work', location: undefined }
+  ];
+
+  assert.equal(findFunctionHotspot(fn, profile), undefined);
+});
+
 test('combines source findings such as goroutine growth with profile evidence', () => {
   const report = collectFunctionEvidence(
     fn,

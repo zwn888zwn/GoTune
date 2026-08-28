@@ -148,9 +148,10 @@ export function findFunctionHotspot(
     )
     .sort((left, right) => right.cumulative - left.cumulative)[0];
   if (bySource) return bySource;
-  return session.hotspots
+  const byName = session.hotspots
     .filter((hotspot) => functionNameMatches(hotspot.name, fn.name))
-    .sort((left, right) => right.cumulative - left.cumulative)[0];
+    .sort((left, right) => right.cumulative - left.cumulative);
+  return byName.length === 1 ? byName[0] : undefined;
 }
 
 function findCallContext(

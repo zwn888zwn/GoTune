@@ -55,13 +55,79 @@ var value = layout{true, 1}
 	}
 }
 
+func TestInspectStructUsesActiveBuildFiles(t *testing.T) {
+	directory := t.TempDir()
+	writeTestFile(t, filepath.Join(directory, "go.mod"), "module example.com/layout\n\ngo 1.19\n")
+	filename := filepath.Join(directory, "sample.go")
+	writeTestFile(t, filename, `package sample
+
+type layout struct {
+	ready bool
+	count int64
+}
+`)
+	writeTestFile(t, filepath.Join(directory, "excluded.go"), `//go:build never
+
+package sample
+
+type layout struct{ duplicate string }
+`)
+	result, err := inspectStruct(filename, "layout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Size != 16 {
+		t.Fatalf("unexpected active layout size: %d", result.Size)
+	}
+}
+
+func TestInspectStructResolvesModuleImports(t *testing.T) {
+	directory := t.TempDir()
+	writeTestFile(t, filepath.Join(directory, "go.mod"), "module example.com/layout\n\ngo 1.19\n")
+	writeTestFile(t, filepath.Join(directory, "dep", "value.go"), `package dep
+
+type Value struct{ Count int64 }
+`)
+	filename := filepath.Join(directory, "sample.go")
+	writeTestFile(t, filename, `package sample
+
+import "example.com/layout/dep"
+
+type layout struct {
+	ready bool
+	value dep.Value
+	retry bool
+}
+`)
+	result, err := inspectStruct(filename, "layout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Size != 24 || result.OptimizedSize != 16 {
+		t.Fatalf("unexpected imported layout sizes: %d -> %d", result.Size, result.OptimizedSize)
+	}
+	if result.Fields[1].Type != "dep.Value" {
+		t.Fatalf("module type was not resolved: %s", result.Fields[1].Type)
+	}
+}
+
 func writeGoFile(t *testing.T, source string) string {
 	t.Helper()
-	filename := filepath.Join(t.TempDir(), "sample.go")
+	directory := t.TempDir()
+	writeTestFile(t, filepath.Join(directory, "go.mod"), "module example.com/sample\n\ngo 1.19\n")
+	filename := filepath.Join(directory, "sample.go")
+	writeTestFile(t, filename, source)
+	return filename
+}
+
+func writeTestFile(t *testing.T, filename, source string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(filename), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filename, []byte(source), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return filename
 }
 
 func containsReason(reasons []string, part string) bool {

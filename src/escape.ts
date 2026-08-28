@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import * as vscode from 'vscode';
@@ -27,27 +28,59 @@ export async function analyzeEscapes(
     void vscode.window.showWarningMessage(`GoTune: Could not locate ${file} in this workspace.`);
     return;
   }
-  const functionRange = hotspot ? await findFunctionRange(resolvedFile, hotspot) : undefined;
+  const requestedLine = hotspot?.location?.line
+    ?? (editor && path.resolve(editor.document.uri.fsPath) === path.resolve(resolvedFile.fsPath)
+      ? editor.selection.active.line + 1
+      : 1);
+  const functionRange = await findFunctionRange(resolvedFile, requestedLine);
+  const buildTags = vscode.workspace
+    .getConfiguration('go', resolvedFile)
+    .get<string>('buildTags', '')
+    .trim();
+  const effectiveBuildFlags = buildTags && !hasTagsFlag(buildFlags)
+    ? [...buildFlags, `-tags=${buildTags}`]
+    : buildFlags;
 
   const cwd = path.dirname(resolvedFile.fsPath);
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'GoTune: analyzing escapes', cancellable: false },
     async () => {
       try {
-        const result = await execFileAsync(goExecutable, ['build', ...buildFlags, '-gcflags=-m=2', '.'], {
+        const result = await execFileAsync(
+          goExecutable,
+          ['build', ...effectiveBuildFlags, '-gcflags=-m=2', '-o', os.devNull, '.'],
+          {
+            cwd,
+            maxBuffer: 16 * 1024 * 1024,
+            env: { ...process.env, ...environment }
+          }
+        );
+        publishDiagnostics(
+          `${result.stdout}\n${result.stderr}`,
           cwd,
-          maxBuffer: 16 * 1024 * 1024,
-          env: { ...process.env, ...environment }
-        });
-        publishDiagnostics(`${result.stdout}\n${result.stderr}`, cwd, hotspot, session, functionRange, diagnostics);
+          resolvedFile.fsPath,
+          hotspot,
+          session,
+          functionRange,
+          diagnostics
+        );
       } catch (error) {
         const failure = error as { stdout?: string; stderr?: string; message?: string; code?: string };
         const output = `${failure.stdout ?? ''}\n${failure.stderr ?? ''}`;
-        const count = publishDiagnostics(output, cwd, hotspot, session, functionRange, diagnostics);
+        const count = publishDiagnostics(
+          output,
+          cwd,
+          resolvedFile.fsPath,
+          hotspot,
+          session,
+          functionRange,
+          diagnostics
+        );
         if (count === 0) {
           const hint = failure.code === 'ENOENT'
-            ? `Go executable "${goExecutable}" was not found. Check the VS Code Go extension settings.`
-            : failure.message ?? 'Escape analysis failed';
+            ? `找不到 Go 可执行文件“${goExecutable}”，请检查 VS Code Go 设置。`
+            : summarizeBuildFailure(output)
+              ?? '逃逸分析失败，请检查当前 package 的构建配置。';
           void vscode.window.showErrorMessage(`GoTune: ${hint}`);
         }
       }
@@ -55,9 +88,26 @@ export async function analyzeEscapes(
   );
 }
 
+function hasTagsFlag(buildFlags: string[]): boolean {
+  return buildFlags.some((flag) => flag === '-tags' || flag.startsWith('-tags='));
+}
+
+function summarizeBuildFailure(output: string): string | undefined {
+  const errors = output
+    .split(/\r?\n/)
+    .map((line) => compilerLine.exec(line.trim()))
+    .filter((match): match is RegExpExecArray => Boolean(match))
+    .filter((match) => !/(escapes to heap|moved to heap|captur|leaking param|heap)/i.test(match[4]));
+  if (errors.length === 0) return undefined;
+  const first = errors[0];
+  const additional = errors.length > 1 ? `，另有 ${errors.length - 1} 个编译错误` : '';
+  return `当前 package 无法编译：${path.basename(first[1])}:${first[2]}:${first[3]} ${first[4]}${additional}。请先修复错误，或确认 go.buildTags 配置正确。`;
+}
+
 function publishDiagnostics(
   output: string,
   cwd: string,
+  targetFile: string,
   hotspot: Hotspot | undefined,
   session: ProfileSession | undefined,
   functionRange: vscode.Range | undefined,
@@ -69,13 +119,13 @@ function publishDiagnostics(
     const match = compilerLine.exec(rawLine.trim());
     if (!match) continue;
     const message = match[4];
-    if (!/(escapes to heap|moved to heap|captur|leaking param|heap)/i.test(message)) continue;
+    if (!/(escapes to heap|moved to heap|leaking param|heap)/i.test(message)) continue;
     const filename = path.resolve(cwd, match[1]);
-    if (hotspot?.location?.file && path.basename(filename) !== path.basename(hotspot.location.file)) continue;
+    if (path.resolve(filename) !== path.resolve(targetFile)) continue;
     const line = Math.max(0, Number(match[2]) - 1);
     if (functionRange && (line < functionRange.start.line || line > functionRange.end.line)) continue;
     const column = Math.max(0, Number(match[3]) - 1);
-    const evidence = hotspot && session
+    const evidence = hotspot && session?.sampleType.startsWith('alloc_')
       ? ` · Profile evidence: ${formatProfileValue(hotspot.cumulative, session.sampleUnit)} cumulative`
       : '';
     const diagnostic = new vscode.Diagnostic(
@@ -90,7 +140,7 @@ function publishDiagnostics(
     collection.set(vscode.Uri.file(filename), entries);
   }
   const count = [...grouped.values()].reduce((sum, entries) => sum + entries.length, 0);
-  const target = hotspot?.name ?? 'current package';
+  const target = hotspot?.name ?? (functionRange ? 'current function' : path.basename(targetFile));
   const summary = count === 0
     ? `GoTune: ${target} has no compiler-reported escapes.`
     : `GoTune: found ${count} escape result${count === 1 ? '' : 's'} in ${target}.`;
@@ -98,9 +148,9 @@ function publishDiagnostics(
   return count;
 }
 
-async function findFunctionRange(uri: vscode.Uri, hotspot: Hotspot): Promise<vscode.Range | undefined> {
+async function findFunctionRange(uri: vscode.Uri, requestedLine: number): Promise<vscode.Range | undefined> {
   const document = await vscode.workspace.openTextDocument(uri);
-  const targetLine = Math.max(0, Math.min(document.lineCount - 1, (hotspot.location?.line ?? 1) - 1));
+  const targetLine = Math.max(0, Math.min(document.lineCount - 1, requestedLine - 1));
   const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
     'vscode.executeDocumentSymbolProvider',
     uri
@@ -135,7 +185,9 @@ async function findFunctionRange(uri: vscode.Uri, hotspot: Hotspot): Promise<vsc
         }
       }
       if (opened && depth <= 0) {
-        return new vscode.Range(start, 0, end, document.lineAt(end).text.length);
+        return targetLine <= end
+          ? new vscode.Range(start, 0, end, document.lineAt(end).text.length)
+          : undefined;
       }
     }
   }

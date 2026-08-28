@@ -35,7 +35,7 @@ test('parses goroutine states and source frames', () => {
   assert.equal(parsed[0].frames[0].line, 10);
 });
 
-test('groups stacks, removes profiler noise, and detects stable blocking', () => {
+test('groups stacks, removes profiler noise, and reports blocking without a stall verdict', () => {
   const tracker = new GoroutineTracker();
   const first = tracker.capture(dump);
   assert.equal(first.total, 3);
@@ -45,11 +45,11 @@ test('groups stacks, removes profiler noise, and detects stable blocking', () =>
   const second = tracker.capture(dump);
   const blocked = second.groups.find((group) => group.state === 'chan receive');
   assert.equal(blocked.stableCaptures, 2);
-  assert.equal(blocked.severity, 'suspicious');
-  assert.equal(second.suspiciousCount, 2);
+  assert.equal(blocked.severity, 'watch');
+  assert.equal(second.suspiciousCount, 0);
   assert.equal(second.totalDelta, 0);
   assert.equal(second.totalGrowth, 0);
-  assert.equal(assessGoroutineSnapshot(second).kind, 'possible-stall');
+  assert.equal(assessGoroutineSnapshot(second).kind, 'needs-more-samples');
 });
 
 test('reports goroutine count growth for a stable stack', () => {

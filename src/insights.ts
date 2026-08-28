@@ -10,12 +10,22 @@ export interface ProfileInsight {
   location?: SourceLocation;
 }
 
-export function profileMeaning(sampleType: string): string {
+export function profileMeaning(
+  sampleType: string,
+  source = '',
+  captureMode?: ProfileSession['captureMode']
+): string {
   if (sampleType === 'cpu') return 'CPU 采样时间：用于定位真正消耗 CPU 的函数和调用路径。';
-  if (sampleType === 'inuse_space') return 'GC 后仍存活的内存：用于定位当前内存占用和疑似泄漏。';
-  if (sampleType === 'inuse_objects') return 'GC 后仍存活的对象数：用于定位大量未释放的小对象。';
-  if (sampleType === 'alloc_space') return '启动以来累计分配量：用于定位分配压力，不等于内存泄漏。';
-  if (sampleType === 'alloc_objects') return '启动以来累计分配对象数：用于定位频繁创建对象的位置。';
+  if (sampleType === 'inuse_space') return 'Heap Profile 中记录的存活内存：按对象分配调用栈归因。';
+  if (sampleType === 'inuse_objects') return 'Heap Profile 中记录的存活对象数：按对象分配调用栈归因。';
+  if (sampleType === 'alloc_space') return `${captureMode === 'delta' ? '采集窗口内' : 'Profile 范围内'}累计分配量：用于定位分配压力，不等于内存泄漏。`;
+  if (sampleType === 'alloc_objects') return `${captureMode === 'delta' ? '采集窗口内' : 'Profile 范围内'}累计分配对象数：用于定位频繁创建对象的位置。`;
+  if (source.toLowerCase().includes('/mutex')) {
+    return 'Mutex Profile：等待时间归因到发生解锁的调用栈，表示锁竞争成本，不是等待方调用栈。';
+  }
+  if (source.toLowerCase().includes('/block')) {
+    return 'Block Profile：阻塞时间归因到发生阻塞的 goroutine 调用栈。';
+  }
   if (/delay|contentions|mutex|block/i.test(sampleType)) {
     return '阻塞或锁竞争证据：用于定位 goroutine 等待时间花在哪里。';
   }
@@ -33,10 +43,10 @@ export function buildProfileInsights(session: ProfileSession): ProfileInsight[] 
     }];
   }
 
-  const application = session.hotspots.filter((hotspot) =>
+  const sourceMapped = session.hotspots.filter((hotspot) =>
     hotspot.location && !isRuntimeHotspot(hotspot)
   );
-  const candidates = application.length > 0 ? application : session.hotspots;
+  const candidates = sourceMapped.length > 0 ? sourceMapped : session.hotspots;
   const pathHotspot = candidates[0];
   const selfHotspot = [...candidates].sort((left, right) => right.flat - left.flat)[0];
   const insights: ProfileInsight[] = [];
@@ -45,13 +55,13 @@ export function buildProfileInsights(session: ProfileSession): ProfileInsight[] 
   if (session.sampleType === 'cpu') {
     insights.push(hotspotInsight(
       `主要 CPU 调用路径：${shortName(pathHotspot)}`,
-      `包含下层调用后占本次采样的 ${pathPercent}%。先从这条调用路径进入源码。`,
+      `包含下层调用后占本次采样的 ${pathPercent}%。`,
       pathHotspot
     ));
     if (selfHotspot.flat > 0) {
       insights.push(hotspotInsight(
         `函数自身 CPU 最高：${shortName(selfHotspot)}`,
-        `不包含下层调用时占 ${percent(selfHotspot.flat, session.total)}%，通常是最直接的计算热点。`,
+        `不包含下层调用时占本次采样的 ${percent(selfHotspot.flat, session.total)}%。`,
         selfHotspot
       ));
     }
@@ -62,14 +72,14 @@ export function buildProfileInsights(session: ProfileSession): ProfileInsight[] 
       selfHotspot
     ));
     insights.push(hotspotInsight(
-      `主要保留路径：${shortName(pathHotspot)}`,
-      `包含下层分配后占 ${pathPercent}%，可沿调用关系查找对象由谁创建。`,
+      `存活对象的主要分配调用路径：${shortName(pathHotspot)}`,
+      `该分配调用路径的累计值占 ${pathPercent}%。Heap Profile 不提供“谁仍在引用对象”的保留关系。`,
       pathHotspot
     ));
   } else if (/^alloc_/.test(session.sampleType)) {
     insights.push(hotspotInsight(
       `累计分配热点：${shortName(selfHotspot)}`,
-      `该函数自身产生 ${percent(selfHotspot.flat, session.total)}% 的累计分配，适合检查临时对象和复用机会。`,
+      `该函数自身记录了本次 Profile 总累计分配的 ${percent(selfHotspot.flat, session.total)}%。`,
       selfHotspot
     ));
     insights.push({
@@ -78,17 +88,18 @@ export function buildProfileInsights(session: ProfileSession): ProfileInsight[] 
       kind: 'info'
     });
   } else {
+    const mutex = session.source.toLowerCase().includes('/mutex');
     insights.push(hotspotInsight(
-      `主要等待路径：${shortName(pathHotspot)}`,
-      `累计贡献 ${pathPercent}%，点击可查看对应源码。`,
+      `${mutex ? '主要互斥锁释放栈' : '主要阻塞调用栈'}：${shortName(pathHotspot)}`,
+      `累计样本占 ${pathPercent}%。${mutex ? 'Mutex Profile 将竞争成本记录在解锁栈。' : '点击可查看发生阻塞的源码。'}`,
       pathHotspot
     ));
   }
 
-  if (application.length === 0) {
+  if (sourceMapped.length === 0) {
     insights.push({
-      title: '没有映射到工作区业务源码',
-      detail: '当前热点主要来自 Go 运行时或依赖；可以关闭“隐藏 Go runtime”继续查看完整调用链。',
+      title: '没有非运行时源码位置',
+      detail: '当前热点没有可用的非运行时源码位置；可以关闭“隐藏 Go runtime”继续查看完整调用链。',
       kind: 'warning'
     });
   }

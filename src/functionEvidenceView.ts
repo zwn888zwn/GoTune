@@ -41,7 +41,7 @@ export function showFunctionEvidencePanel(
     .item h2{font-size:15px;margin:0 0 3px}.capture{font-size:12px;color:var(--vscode-descriptionForeground);margin-bottom:10px}
     .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:7px;margin-bottom:10px}
     .metric{background:var(--vscode-editor-inactiveSelectionBackground);padding:8px 10px;border-radius:4px}.metric strong{display:block;font-size:16px}.metric span{font-size:11px;color:var(--vscode-descriptionForeground)}
-    .caller,.delta{margin:7px 0;color:var(--vscode-descriptionForeground)}.good{color:var(--vscode-testing-iconPassed)}.bad{color:var(--vscode-testing-iconFailed)}
+    .caller,.delta{margin:7px 0;color:var(--vscode-descriptionForeground)}
     .actions,.missing{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}button{border:0;padding:6px 10px;color:var(--vscode-button-foreground);background:var(--vscode-button-background)}button.secondary{color:var(--vscode-button-secondaryForeground);background:var(--vscode-button-secondaryBackground)}
     .empty{padding:18px;border:1px dashed var(--vscode-panel-border);color:var(--vscode-descriptionForeground)}
   </style>
@@ -120,7 +120,7 @@ function findingHtml(finding: FunctionEvidenceReport['findings'][number]): strin
     <div class="capture">${severityLabel(finding.severity)} · 综合分析证据</div>
     <div>${escapeHtml(finding.detail)}</div>
     <div class="actions">
-      <button data-command="open-finding" data-finding-id="${escapeHtml(finding.id)}">查看结论与下一步</button>
+      <button data-command="open-finding" data-finding-id="${escapeHtml(finding.id)}">查看证据与后续操作</button>
       ${finding.location
         ? relatedButton('打开证据位置', finding.location.file, finding.location.line)
         : ''}
@@ -130,7 +130,6 @@ function findingHtml(finding: FunctionEvidenceReport['findings'][number]): strin
 
 function evidenceHtml(item: FunctionEvidenceItem): string {
   const delta = item.baselineDelta;
-  const deltaClass = delta === undefined ? '' : delta > 0 ? 'bad' : delta < 0 ? 'good' : '';
   const deltaText = delta === undefined
     ? ''
     : `${delta > 0 ? '+' : ''}${formatValue(delta, item.sampleUnit)}${item.baselineDeltaPercent === undefined
@@ -153,7 +152,7 @@ function evidenceHtml(item: FunctionEvidenceItem): string {
         ? relatedButton(callee.name, callee.location.file, callee.location.line)
         : `<span>${escapeHtml(callee.name)}</span>`).join(' ')}
     </div>` : ''}
-    ${deltaText ? `<div class="delta ${deltaClass}">相对基线：<b>${escapeHtml(deltaText)}</b></div>` : ''}
+    ${deltaText ? `<div class="delta">相对基线的原始差值：<b>${escapeHtml(deltaText)}</b></div>` : ''}
     <div class="actions">
       <button data-command="open-profile" data-session-id="${escapeHtml(item.sessionId)}">在调用图中定位</button>
       ${item.kind === 'allocation'
@@ -187,7 +186,7 @@ function latestEvidence(items: FunctionEvidenceItem[]): FunctionEvidenceItem[] {
 }
 
 function severityLabel(severity: FunctionEvidenceReport['findings'][number]['severity']): string {
-  if (severity === 'verified') return '已确认';
+  if (severity === 'verified') return '已记录';
   if (severity === 'suspicious') return '可疑';
   if (severity === 'watch') return '需观察';
   return '信息';

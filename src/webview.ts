@@ -198,7 +198,7 @@ export function showProfilePanel(
     <div class="card"><strong>${escapeHtml(hottest ? displayShortName(hottest.name) : '—')}</strong><span>全局最高函数</span></div>
   </div>
   ${focusedHotspot ? `<div class="focus"><b>已定位当前函数：</b>${escapeHtml(focusedHotspot.name)}。调用图只展示它附近的调用方和下游；点击任意节点会回到源码并打开该函数详情。</div>` : ''}
-  <div class="meaning"><b>这个 Profile 表示：</b>${escapeHtml(profileMeaning(session.sampleType))}</div>
+  <div class="meaning"><b>这个 Profile 表示：</b>${escapeHtml(profileMeaning(session.sampleType, session.source, session.captureMode))}</div>
   ${detailHotspot ? `<div class="selected-detail">
     <div><strong id="detail-name">${escapeHtml(detailHotspot.name)}</strong><span id="detail-source">${escapeHtml(detailHotspot.location ? `${detailHotspot.location.file}:${detailHotspot.location.line}` : '没有源码位置')}</span></div>
     <div><strong id="detail-self">${formatValue(detailHotspot.flat, session.sampleUnit)}</strong><span id="detail-self-label">自身 · ${(session.total === 0 ? 0 : detailHotspot.flat / session.total * 100).toFixed(1)}%</span></div>
@@ -208,7 +208,7 @@ export function showProfilePanel(
     ? '<div class="notice">Graphviz 不可用，已回退到瓶颈排行和源码证据。安装 dot 后可查看调用图。</div>'
     : ''}
   <div class="next-step">
-    <strong>对比优化效果：</strong>
+    <strong>对比原始采样差异：</strong>
     ${baselineState === 'none' ? '<button class="secondary" data-action="baseline">设为修改前基线</button>' : ''}
     ${baselineState === 'available' ? '<button data-action="compare">与基线比较</button>' : ''}
     <button class="secondary" data-action="recapture">重新采集</button>
@@ -341,10 +341,9 @@ export function showMemoryTrendPanel(
   const growing = trend.entries.filter((entry) => entry.consistentlyGrowing && entry.growth > 0);
   const unit = trend.sessions[0]?.sampleUnit ?? 'bytes';
   const metricLabel = unit === 'bytes' ? 'live heap' : 'live objects';
-  const growthClass = trend.totalGrowth > 0 ? 'bad' : 'good';
-  const verdict = growing.length > 0
-    ? `发现 ${growing.length} 个连续增长的业务代码分配点，需要进一步确认对象为什么仍被引用。`
-    : '没有发现连续三次都增长的业务代码分配点；目前没有明确的泄漏证据。';
+  const observation = growing.length > 0
+    ? `${growing.length} 个源码映射分配点在这三次快照中的数值非递减。`
+    : '没有源码映射分配点同时满足“首末为正差值且三次快照非递减”。';
 
   panel.webview.html = `<!doctype html>
 <html>
@@ -355,31 +354,30 @@ export function showMemoryTrendPanel(
   <style nonce="${nonce}">
     body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);padding:18px}
     h1{font-size:18px;margin:0 0 4px}.summary{color:var(--vscode-descriptionForeground);margin-bottom:14px}
-    .verdict{border-left:3px solid ${growing.length > 0 ? 'var(--vscode-testing-iconFailed)' : 'var(--vscode-testing-iconPassed)'};background:var(--vscode-textBlockQuote-background);padding:11px 13px;margin-bottom:14px}
+    .verdict{border-left:3px solid var(--vscode-charts-blue);background:var(--vscode-textBlockQuote-background);padding:11px 13px;margin-bottom:14px}
     .cards{display:grid;grid-template-columns:repeat(${trend.totals.length + 1},minmax(130px,1fr));gap:8px;margin-bottom:16px}.card{background:var(--vscode-editor-inactiveSelectionBackground);padding:10px 12px;border-radius:4px}.card strong{display:block;font-size:18px}.card span,.hint{font-size:12px;color:var(--vscode-descriptionForeground)}
-    .bad{color:var(--vscode-testing-iconFailed)}.good{color:var(--vscode-testing-iconPassed)}
     table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--vscode-panel-border)}.number{text-align:right;font-variant-numeric:tabular-nums}
-    tr[data-file]:not([data-file=""]){cursor:pointer}tbody tr:hover{background:var(--vscode-list-hoverBackground)}.badge{display:inline-block;padding:2px 7px;border-radius:10px;background:var(--vscode-testing-iconFailed);color:var(--vscode-editor-background);font-size:11px}
+    tr[data-file]:not([data-file=""]){cursor:pointer}tbody tr:hover{background:var(--vscode-list-hoverBackground)}.badge{display:inline-block;padding:2px 7px;border-radius:10px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);font-size:11px}
   </style>
 </head>
 <body>
   <h1>Memory Growth / 内存增长检测</h1>
   <div class="summary">三次快照均在强制 GC 后采集；这里展示 ${metricLabel} 的变化。</div>
-  <div class="verdict"><b>结论：</b>${escapeHtml(verdict)}</div>
+  <div class="verdict"><b>采样观察：</b>${escapeHtml(observation)} 这不是内存泄漏结论；请结合更长时间窗口、对象数量和业务生命周期判断。</div>
   <div class="cards">
     ${trend.totals.map((total, index) => `<div class="card"><strong>${formatValue(total, unit)}</strong><span>${index === 0 ? 'Baseline' : `Round ${index}`} ${metricLabel}</span></div>`).join('')}
-    <div class="card"><strong class="${growthClass}">${trend.totalGrowth > 0 ? '+' : ''}${formatValue(trend.totalGrowth, unit)}</strong><span>Total change</span></div>
+    <div class="card"><strong>${trend.totalGrowth > 0 ? '+' : ''}${formatValue(trend.totalGrowth, unit)}</strong><span>Total change</span></div>
   </div>
   <table>
-    <thead><tr><th>业务函数</th>${trend.totals.map((_, index) => `<th class="number">${index === 0 ? 'Baseline' : `Round ${index}`}</th>`).join('')}<th class="number">增长</th><th>判断</th><th>源码</th></tr></thead>
+    <thead><tr><th>源码映射函数</th>${trend.totals.map((_, index) => `<th class="number">${index === 0 ? 'Baseline' : `Round ${index}`}</th>`).join('')}<th class="number">首末差值</th><th>采样形态</th><th>源码</th></tr></thead>
     <tbody>
-      ${trend.entries.filter((entry) => entry.growth > 0).slice(0, 100).map((entry) => {
+      ${[...trend.entries].sort((left, right) => Math.abs(right.growth) - Math.abs(left.growth)).slice(0, 100).map((entry) => {
         const source = entry.location ? `${entry.location.file}:${entry.location.line}` : '';
         return `<tr data-file="${escapeHtml(entry.location?.file ?? '')}" data-line="${entry.location?.line ?? 0}">
           <td>${escapeHtml(entry.name)}</td>
           ${entry.values.map((value) => `<td class="number">${formatValue(value, unit)}</td>`).join('')}
-          <td class="number bad">+${formatValue(entry.growth, unit)}</td>
-          <td>${entry.consistentlyGrowing ? '<span class="badge">持续增长</span>' : '<span class="hint">有波动</span>'}</td>
+          <td class="number">${entry.growth > 0 ? '+' : ''}${formatValue(entry.growth, unit)}</td>
+          <td>${entry.consistentlyGrowing ? '<span class="badge">三点非递减</span>' : '<span class="hint">有波动</span>'}</td>
           <td>${escapeHtml(source)}</td>
         </tr>`;
       }).join('')}
@@ -418,20 +416,19 @@ export function showComparisonPanel(
     { enableScripts: true, retainContextWhenHidden: true }
   );
   const nonce = Math.random().toString(36).slice(2);
-  const regressions = comparison.entries.filter((entry) => entry.delta > 0).length;
-  const improvements = comparison.entries.filter((entry) => entry.delta < 0).length;
-  const totalClass = comparison.totalDelta > 0 ? 'bad' : comparison.totalDelta < 0 ? 'good' : '';
+  const increases = comparison.entries.filter((entry) => entry.delta > 0).length;
+  const decreases = comparison.entries.filter((entry) => entry.delta < 0).length;
   const totalPercent = comparison.totalDeltaPercent === undefined
     ? 'new'
     : `${comparison.totalDeltaPercent > 0 ? '+' : ''}${comparison.totalDeltaPercent.toFixed(1)}%`;
-  const topRegression = comparison.entries.find((entry) =>
+  const topIncrease = comparison.entries.find((entry) =>
     entry.delta > 0 && entry.location && !isRuntimeFunction(entry.name, entry.location.file)
   );
-  const comparisonVerdict = comparison.totalDelta > 0
-    ? `总量增加 ${formatValue(comparison.totalDelta, current.sampleUnit)}。${topRegression ? `业务代码中增长最多的是 ${displayShortName(topRegression.name)}（+${formatValue(topRegression.delta, current.sampleUnit)}）。` : '请查看下面的增长项。'}`
+  const comparisonSummary = comparison.totalDelta > 0
+    ? `总量原始差值为 +${formatValue(comparison.totalDelta, current.sampleUnit)}。${topIncrease ? `源码映射项中增加最多的是 ${displayShortName(topIncrease.name)}（+${formatValue(topIncrease.delta, current.sampleUnit)}）。` : ''}`
     : comparison.totalDelta < 0
-      ? `总量减少 ${formatValue(Math.abs(comparison.totalDelta), current.sampleUnit)}，当前结果低于基线。`
-      : '总量没有变化，请继续查看函数级差异。';
+      ? `总量原始差值为 -${formatValue(Math.abs(comparison.totalDelta), current.sampleUnit)}。`
+      : '总量原始差值为 0。';
 
   panel.webview.html = `<!doctype html>
 <html>
@@ -443,13 +440,12 @@ export function showComparisonPanel(
     body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);padding:18px}
     h1{font-size:18px;margin:0 0 4px}.summary{color:var(--vscode-descriptionForeground);margin-bottom:14px}
     .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-bottom:18px}.card{background:var(--vscode-editor-inactiveSelectionBackground);padding:10px 12px;border-radius:4px}.card strong{display:block;font-size:18px}.card span{font-size:12px;color:var(--vscode-descriptionForeground)}
-    .good{color:var(--vscode-testing-iconPassed)}.bad{color:var(--vscode-testing-iconFailed)}
     .toolbar{display:flex;gap:12px;align-items:center;margin-bottom:10px}.toolbar input{width:min(420px,65vw);padding:6px 8px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border)}
     .toolbar label{font-size:12px;color:var(--vscode-descriptionForeground)}
     table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--vscode-panel-border)}
     tr[data-file]:not([data-file=""]){cursor:pointer}tbody tr:hover{background:var(--vscode-list-hoverBackground)}
     .number{text-align:right;font-variant-numeric:tabular-nums}
-    .verdict{border-left:3px solid ${comparison.totalDelta > 0 ? 'var(--vscode-testing-iconFailed)' : 'var(--vscode-testing-iconPassed)'};background:var(--vscode-textBlockQuote-background);padding:10px 12px;margin-bottom:14px}.verdict[data-file]:not([data-file=""]){cursor:pointer}
+    .verdict{border-left:3px solid var(--vscode-charts-blue);background:var(--vscode-textBlockQuote-background);padding:10px 12px;margin-bottom:14px}.verdict[data-file]:not([data-file=""]){cursor:pointer}
     .warning{border-left:3px solid var(--vscode-editorWarning-foreground);background:var(--vscode-textBlockQuote-background);padding:8px 11px;margin-bottom:8px;color:var(--vscode-descriptionForeground)}
   </style>
 </head>
@@ -457,19 +453,18 @@ export function showComparisonPanel(
   <h1>Profile comparison</h1>
   <div class="summary">${escapeHtml(baseline.name)} → ${escapeHtml(current.name)} · ${escapeHtml(current.sampleType)} (${escapeHtml(current.sampleUnit)})</div>
   ${comparison.warnings.map((warning) => `<div class="warning">⚠ ${escapeHtml(warning)}</div>`).join('')}
-  <div class="verdict" data-file="${escapeHtml(topRegression?.location?.file ?? '')}" data-line="${topRegression?.location?.line ?? 0}"><b>结论：</b>${escapeHtml(comparisonVerdict)}${topRegression ? ' 点击打开源码。' : ''}</div>
+  <div class="verdict" data-file="${escapeHtml(topIncrease?.location?.file ?? '')}" data-line="${topIncrease?.location?.line ?? 0}"><b>原始差异：</b>${escapeHtml(comparisonSummary)}${topIncrease ? ' 点击打开源码。' : ''}<br><span class="summary">采样差异本身不代表性能改善或退化。</span></div>
   <div class="cards">
     <div class="card"><strong>${formatValue(baseline.total, baseline.sampleUnit)}</strong><span>Baseline total</span></div>
     <div class="card"><strong>${formatValue(current.total, current.sampleUnit)}</strong><span>Current total</span></div>
-    <div class="card"><strong class="${totalClass}">${totalPercent}</strong><span>Total change</span></div>
-    <div class="card"><strong><span class="bad">${regressions} regressions</span> · <span class="good">${improvements} improvements</span></strong><span>Changed functions</span></div>
+    <div class="card"><strong>${totalPercent}</strong><span>Total change</span></div>
+    <div class="card"><strong>${increases} increased · ${decreases} decreased</strong><span>Non-zero function deltas</span></div>
   </div>
   <div class="toolbar"><input id="filter" placeholder="Filter functions or source paths"><label><input id="changed" type="checkbox" checked> Changed only</label><label><input id="runtime" type="checkbox" checked> Hide Go runtime</label></div>
   <table>
     <thead><tr><th>Function</th><th class="number">Before</th><th class="number">After</th><th class="number">Delta</th><th class="number">Change</th><th>Source</th></tr></thead>
     <tbody>
       ${comparison.entries.map((entry) => {
-        const deltaClass = entry.delta > 0 ? 'bad' : entry.delta < 0 ? 'good' : '';
         const deltaText = `${entry.delta > 0 ? '+' : ''}${formatValue(entry.delta, current.sampleUnit)}`;
         const percent = entry.deltaPercent === undefined
           ? entry.after === 0 ? 'removed' : 'new'
@@ -477,7 +472,7 @@ export function showComparisonPanel(
         const source = entry.location ? `${entry.location.file}:${entry.location.line}` : '';
         return `<tr data-changed="${entry.delta !== 0}" data-runtime="${isRuntimeFunction(entry.name, entry.location?.file)}" data-filter="${escapeHtml(`${entry.name} ${source}`.toLowerCase())}" data-file="${escapeHtml(entry.location?.file ?? '')}" data-line="${entry.location?.line ?? 0}">
           <td>${escapeHtml(entry.name)}</td><td class="number">${formatValue(entry.before, current.sampleUnit)}</td><td class="number">${formatValue(entry.after, current.sampleUnit)}</td>
-          <td class="number ${deltaClass}">${deltaText}</td><td class="number ${deltaClass}">${percent}</td><td>${escapeHtml(source)}</td>
+          <td class="number">${deltaText}</td><td class="number">${percent}</td><td>${escapeHtml(source)}</td>
         </tr>`;
       }).join('')}
     </tbody>
@@ -554,14 +549,14 @@ export function showGoroutineInspector(
     <div class="card"><strong>${snapshot.total}${snapshot.totalGrowth === 0 ? '' : ` (${snapshot.totalGrowth > 0 ? '+' : ''}${snapshot.totalGrowth})`}</strong><span>Application goroutines / growth since first sample</span></div>
     <div class="card"><strong>${snapshot.groups.length}</strong><span>Unique stack groups</span></div>
     <div class="card"><strong>${snapshot.stateCount}</strong><span>Runtime states</span></div>
-    <div class="card"><strong>${snapshot.suspiciousCount}</strong><span>Suspicious after repeated captures</span></div>
+    <div class="card"><strong>${watched}</strong><span>Blocking-state goroutines selected for review</span></div>
   </div>
   <div class="notice"><b>${escapeHtml(assessment.title)}</b><br>${escapeHtml(assessment.detail)}</div>
   <div class="toolbar">
     <input id="filter" placeholder="Filter state, function, or source">
     <select id="state"><option value="">All states</option>${states.map((state) => `<option value="${escapeHtml(state)}">${escapeHtml(state)}</option>`).join('')}</select>
     <label class="hint"><input id="hide-normal" type="checkbox" checked> Hide normal waits</label>
-    <span class="hint">${watched} goroutine(s) need review</span>
+    <span class="hint">${watched} goroutine(s) selected by the blocking-state filter</span>
   </div>
   <table>
     <thead><tr><th class="number">Count</th><th class="number">Growth</th><th>State</th><th>Top frame</th><th>Stability</th><th>Assessment</th><th>Source</th></tr></thead>

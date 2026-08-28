@@ -9,7 +9,9 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -36,6 +38,14 @@ type layoutResult struct {
 	SafeToApply     bool          `json:"safeToApply"`
 	SafetyReasons   []string      `json:"safetyReasons"`
 	OptimizedSource string        `json:"optimizedSource,omitempty"`
+}
+
+type listedPackage struct {
+	Dir        string
+	ImportPath string
+	Name       string
+	GoFiles    []string
+	CgoFiles   []string
 }
 
 func main() {
@@ -70,32 +80,31 @@ func inspectStruct(filename, structName string) (layoutResult, error) {
 		return layoutResult{}, err
 	}
 	fset := token.NewFileSet()
-	packages, err := parser.ParseDir(
-		fset,
-		filepath.Dir(filename),
-		func(info os.FileInfo) bool {
-			return !strings.HasSuffix(info.Name(), "_test.go")
-		},
-		parser.ParseComments,
-	)
+	listed, err := listPackage(filepath.Dir(filename))
 	if err != nil {
 		return layoutResult{}, err
 	}
-	var targetPackage *ast.Package
+	targetPackage := &ast.Package{Name: listed.Name, Files: make(map[string]*ast.File)}
 	var targetFile *ast.File
 	cleanFilename, _ := filepath.Abs(filename)
-	for _, pkg := range packages {
-		for parsedName, parsedFile := range pkg.Files {
-			absolute, _ := filepath.Abs(parsedName)
-			if absolute == cleanFilename {
-				targetPackage = pkg
-				targetFile = parsedFile
-				break
-			}
+	activeFiles := append(append([]string(nil), listed.GoFiles...), listed.CgoFiles...)
+	for _, name := range activeFiles {
+		parsedName := filepath.Join(listed.Dir, name)
+		parsedFile, parseErr := parser.ParseFile(fset, parsedName, nil, parser.ParseComments)
+		if parseErr != nil {
+			return layoutResult{}, parseErr
+		}
+		targetPackage.Files[parsedName] = parsedFile
+		absolute, _ := filepath.Abs(parsedName)
+		if absolute == cleanFilename {
+			targetFile = parsedFile
 		}
 	}
-	if targetPackage == nil || targetFile == nil {
-		return layoutResult{}, fmt.Errorf("could not find %s in its parsed package", filename)
+	if targetFile == nil {
+		return layoutResult{}, fmt.Errorf(
+			"%s is excluded by the current GOOS, GOARCH, or build tags",
+			filename,
+		)
 	}
 	var typeSpec *ast.TypeSpec
 	var structNode *ast.StructType
@@ -132,13 +141,17 @@ func inspectStruct(filename, structName string) (layoutResult, error) {
 	}
 	var typeErrors []string
 	configuration := types.Config{
-		Importer: importer.Default(),
+		Importer: moduleImporter(fset, filepath.Dir(filename)),
 		Sizes:    types.SizesFor("gc", runtime.GOARCH),
 		Error: func(err error) {
 			typeErrors = append(typeErrors, err.Error())
 		},
 	}
-	checked, checkErr := configuration.Check(targetPackage.Name, fset, files, nil)
+	packagePath := listed.ImportPath
+	if packagePath == "" {
+		packagePath = targetPackage.Name
+	}
+	checked, checkErr := configuration.Check(packagePath, fset, files, nil)
 	if checked == nil {
 		return layoutResult{}, fmt.Errorf("could not type-check package: %v (%s)", checkErr, strings.Join(typeErrors, "; "))
 	}
@@ -153,6 +166,15 @@ func inspectStruct(filename, structName string) (layoutResult, error) {
 	structType, ok := named.Underlying().(*types.Struct)
 	if !ok {
 		return layoutResult{}, fmt.Errorf("%s is not a struct", structName)
+	}
+	for index := 0; index < structType.NumFields(); index++ {
+		field := structType.Field(index)
+		if strings.Contains(types.TypeString(field.Type(), nil), "invalid type") {
+			return layoutResult{}, fmt.Errorf(
+				"could not resolve the type of field %s; check the package build configuration",
+				field.Name(),
+			)
+		}
 	}
 	sizes := configuration.Sizes
 	currentOrder := make([]int, structType.NumFields())
@@ -205,6 +227,62 @@ func inspectStruct(filename, structName string) (layoutResult, error) {
 		}
 	}
 	return result, nil
+}
+
+func moduleImporter(fset *token.FileSet, directory string) types.Importer {
+	exportFiles := make(map[string]string)
+	goExecutable := goExecutablePath()
+	return importer.ForCompiler(fset, "gc", func(importPath string) (io.ReadCloser, error) {
+		exportFile := exportFiles[importPath]
+		if exportFile == "" {
+			command := exec.Command(goExecutable, "list", "-export", "-f={{.Export}}", importPath)
+			command.Dir = directory
+			output, err := command.CombinedOutput()
+			if err != nil {
+				return nil, fmt.Errorf(
+					"resolve import %s: %w (%s)",
+					importPath,
+					err,
+					strings.TrimSpace(string(output)),
+				)
+			}
+			exportFile = strings.TrimSpace(string(output))
+			if exportFile == "" {
+				return nil, fmt.Errorf("resolve import %s: go list returned no export data", importPath)
+			}
+			exportFiles[importPath] = exportFile
+		}
+		return os.Open(exportFile)
+	})
+}
+
+func listPackage(directory string) (listedPackage, error) {
+	command := exec.Command(goExecutablePath(), "list", "-json", ".")
+	command.Dir = directory
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return listedPackage{}, fmt.Errorf(
+			"resolve active package files: %w (%s)",
+			err,
+			strings.TrimSpace(string(output)),
+		)
+	}
+	var listed listedPackage
+	if err := json.Unmarshal(output, &listed); err != nil {
+		return listedPackage{}, fmt.Errorf("decode go list output: %w", err)
+	}
+	if listed.Dir == "" || listed.Name == "" || len(listed.GoFiles)+len(listed.CgoFiles) == 0 {
+		return listedPackage{}, fmt.Errorf("go list returned no active Go package files")
+	}
+	return listed, nil
+}
+
+func goExecutablePath() string {
+	goExecutable := filepath.Join(runtime.GOROOT(), "bin", "go")
+	if runtime.GOOS == "windows" {
+		goExecutable += ".exe"
+	}
+	return goExecutable
 }
 
 func describeLayout(value *types.Struct, order []int, sizes types.Sizes) ([]layoutField, int64) {

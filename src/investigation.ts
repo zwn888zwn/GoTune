@@ -100,9 +100,9 @@ export function findingsFromMemoryTrend(
       id: `${idPrefix}-${now}-stable`,
       investigationId,
       kind: 'live-memory',
-      severity: 'verified',
-      title: `No persistent ${subject.toLowerCase()} growth found`,
-      detail: 'Three post-GC captures did not show a continuously growing business-code allocation site.',
+      severity: 'info',
+      title: `No positive ${subject.toLowerCase()} delta in mapped entries`,
+      detail: 'The retained non-runtime source-mapped entries had no positive first-to-last delta across these three post-GC samples.',
       createdAt: now
     }];
   }
@@ -110,13 +110,11 @@ export function findingsFromMemoryTrend(
     id: `${idPrefix}-${now}-${index}`,
     investigationId,
     kind: 'live-memory',
-    severity: entry.consistentlyGrowing ? 'suspicious' : 'watch',
-    title: entry.consistentlyGrowing
-      ? `${subject} keeps growing: ${shortName(entry.name)}`
-      : `${subject} changed: ${shortName(entry.name)}`,
-    detail: `${formatMetric(entry.growth, trend.sessions[0]?.sampleUnit ?? 'bytes')} growth across three post-GC captures.${entry.consistentlyGrowing
-      ? ' The allocation site increased in every capture.'
-      : ' The samples fluctuated, so this is not yet persistent leak evidence.'}`,
+    severity: 'info',
+    title: `${subject} sample delta: ${shortName(entry.name)}`,
+    detail: `${entry.values.map((value) => formatMetric(value, trend.sessions[0]?.sampleUnit ?? 'bytes')).join(' → ')}; first-to-last delta ${formatMetric(entry.growth, trend.sessions[0]?.sampleUnit ?? 'bytes')}.${entry.consistentlyGrowing
+      ? ' The three sampled values were non-decreasing.'
+      : ' The sampled values fluctuated.'}`,
     functionName: entry.name,
     location: entry.location,
     createdAt: now
@@ -137,9 +135,9 @@ export function findingsFromGoroutines(
       id: `goroutine-${now}-stable`,
       investigationId,
       kind: 'goroutine',
-      severity: 'verified',
-      title: 'No stable suspicious goroutine stack found',
-      detail: `${snapshot.total} goroutines were observed; repeated samples did not identify a suspicious stable blocking group.`,
+      severity: 'info',
+      title: 'Goroutine snapshots captured',
+      detail: `${snapshot.total} goroutines were present in the final sample; no group matched the current blocking-state review filter.`,
       createdAt: now
     }];
   }
@@ -153,8 +151,8 @@ export function findingsFromGoroutines(
       id: `goroutine-${now}-${index}`,
       investigationId,
       kind: 'goroutine',
-      severity: group.severity === 'suspicious' ? 'suspicious' : 'watch',
-      title: `${group.count} goroutines stay in ${group.state}`,
+      severity: 'info',
+      title: `${group.count} goroutines sampled in ${group.state}`,
       detail: group.explanation,
       functionName: frame?.functionName ?? group.topFunction,
       location: frame?.file && frame.line ? { file: frame.file, line: frame.line } : undefined,
@@ -177,14 +175,13 @@ export function findingsFromComparison(
       investigationId,
       captureId: comparison.current.id,
       kind: evidenceKind(comparison.current.sampleType),
-      severity: 'verified',
-      title: 'No function-level regression found',
-      detail: `No changed source-mapped function was found against baseline ${comparison.baseline.name}.`,
+      severity: 'info',
+      title: 'No non-zero source-mapped profile delta',
+      detail: `No retained source-mapped function had a non-zero raw delta against ${comparison.baseline.name}.`,
       createdAt: now
     }];
   }
   return businessEntries.map((entry, index) => {
-    const regression = entry.delta > 0;
     const percentText = entry.deltaPercent === undefined
       ? ''
       : ` (${entry.deltaPercent > 0 ? '+' : ''}${entry.deltaPercent.toFixed(1)}%)`;
@@ -193,9 +190,9 @@ export function findingsFromComparison(
       investigationId,
       captureId: comparison.current.id,
       kind: evidenceKind(comparison.current.sampleType),
-      severity: regression ? 'watch' : 'verified',
-      title: `${regression ? 'Regression' : 'Improved'}: ${shortName(entry.name)}`,
-      detail: `${regression ? '+' : ''}${formatMetric(entry.delta, comparison.current.sampleUnit)}${percentText} versus ${comparison.baseline.name}.`,
+      severity: 'info',
+      title: `Profile delta: ${shortName(entry.name)}`,
+      detail: `${entry.delta > 0 ? '+' : ''}${formatMetric(entry.delta, comparison.current.sampleUnit)}${percentText} versus ${comparison.baseline.name}; this is a sampled difference, not a performance verdict.`,
       functionName: entry.name,
       location: entry.location,
       createdAt: now

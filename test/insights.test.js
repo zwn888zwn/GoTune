@@ -34,6 +34,15 @@ test('explains allocation profiles without calling them memory leaks', () => {
   assert.deepEqual(insights[0].location, { file: '/workspace/buffer.go', line: 12 });
 });
 
+test('describes timed allocation profiles as capture-window data', () => {
+  assert.match(profileMeaning('alloc_space', '/debug/pprof/allocs?seconds=10', 'delta'), /采集窗口内/);
+});
+
+test('distinguishes mutex attribution from block wait stacks', () => {
+  assert.match(profileMeaning('delay', '/debug/pprof/mutex'), /解锁/);
+  assert.match(profileMeaning('delay', '/debug/pprof/block'), /发生阻塞/);
+});
+
 test('identifies both CPU call path and self hotspot', () => {
   const profile = {
     ...session('cpu', 100, [

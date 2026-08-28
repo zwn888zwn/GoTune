@@ -93,6 +93,7 @@ let baselineSessionId: string | undefined;
 let activeInvestigationId: string | undefined;
 const memoryGrowthSessions: ProfileSession[] = [];
 const memoryGrowthObjectSessions: ProfileSession[] = [];
+const loadedRawProfileIds = new Set<string>();
 const execFileAsync = promisify(execFile);
 
 const sessionsStorageKey = 'gotune.sessions.v1';
@@ -260,6 +261,12 @@ export function activate(context: vscode.ExtensionContext): void {
   const runner = new ProfilerRunner(targetOutput);
   const traceViewer = new TraceViewer(targetOutput);
   const pprofViewer = new PprofViewer(targetOutput);
+  const registerRawProfile = (sessionIds: string | string[], bytes: Buffer): void => {
+    pprofViewer.registerProfile(sessionIds, bytes);
+    for (const id of Array.isArray(sessionIds) ? sessionIds : [sessionIds]) {
+      loadedRawProfileIds.add(id);
+    }
+  };
   const liveMetricsView = new LiveMetricsView();
   let runtimeOverviewPanel: vscode.WebviewPanel | undefined;
   let runtimeOverviewTimer: NodeJS.Timeout | undefined;
@@ -615,7 +622,7 @@ export function activate(context: vscode.ExtensionContext): void {
         session.captureDurationMs = Date.now() - startedAt;
         session.captureMode = 'delta';
         session.scenarioId = currentInvestigation()?.scenarioId;
-        pprofViewer.registerProfile(session.id, bytes);
+        registerRawProfile(session.id, bytes);
         addSession(session, true);
         if (session.total === 0) {
           void vscode.window.showWarningMessage(
@@ -710,7 +717,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (memoryGrowthSessions.length < 3) {
         void vscode.window.showInformationMessage(
           memoryGrowthSessions.length === 1
-            ? 'GoTune: Baseline captured after GC. Reproduce the suspected leak, then click Check memory growth again.'
+            ? 'GoTune: Baseline captured after GC. Reproduce the memory-growth workload, then click Check memory growth again.'
             : 'GoTune: Second GC snapshot captured. Repeat the same workload once more, then click Check memory growth.'
         );
         return;
@@ -790,7 +797,7 @@ export function activate(context: vscode.ExtensionContext): void {
           session.captureDurationMs = seconds * 1000;
           session.captureMode = 'delta';
           session.scenarioId = currentInvestigation()?.scenarioId;
-          pprofViewer.registerProfile(session.id, profile.bytes);
+          registerRawProfile(session.id, profile.bytes);
           addSession(session, false);
           traceSessions.push({ kind: profile.kind, session });
         }
@@ -1075,8 +1082,8 @@ export function activate(context: vscode.ExtensionContext): void {
           investigationId: investigation.id,
           kind: report.availableKinds[0] ?? 'cpu',
           severity: 'info' as const,
-          title: `Optimize ${fn.name}`,
-          detail: 'Current source function is marked for evidence-guided optimization and verification.',
+          title: `Investigate ${fn.name}`,
+          detail: 'Current source function is marked as the investigation target for repeated evidence capture.',
           functionName: fn.name,
           location: { file: fn.file, line: fn.startLine },
           createdAt: Date.now()
@@ -1169,7 +1176,6 @@ export function activate(context: vscode.ExtensionContext): void {
         if (document.isDirty && !await document.save()) {
           throw new Error('Save the Go source before inspecting its struct layout');
         }
-        const inspectedVersion = document.version;
         const execution = resolveGoExecutionConfiguration();
         try {
           const result = await vscode.window.withProgress(
@@ -1186,9 +1192,7 @@ export function activate(context: vscode.ExtensionContext): void {
               environment: execution.environment
             })
           );
-          showStructLayoutPanel(result, () => {
-            void applySafeStructLayout(document.uri, inspectedVersion, result.optimizedSource);
-          });
+          showStructLayoutPanel(result);
         } catch (error) {
           targetOutput.appendLine(`[GoTune] Struct layout failed: ${errorMessage(error)}`);
           void vscode.window.showErrorMessage(`GoTune: ${errorMessage(error)}`);
@@ -1335,7 +1339,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         actions.push({
           label: 'Mark as optimization target',
-          description: 'Keep this source-backed conclusion as the current fix target',
+          description: 'Keep this source-backed observation as the current investigation target',
           action: 'target'
         });
         const selected = await vscode.window.showQuickPick(actions, {
@@ -1441,6 +1445,12 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showInformationMessage('GoTune: Select another session to compare with the baseline.');
         return;
       }
+      if (!pprofViewer.hasProfile(baseline.id) || !pprofViewer.hasProfile(activeSession.id)) {
+        void vscode.window.showInformationMessage(
+          'GoTune: Raw profile data is unavailable after restart. Re-import or recapture both profiles before comparing function-level deltas.'
+        );
+        return;
+      }
       try {
         const comparison = compareProfiles(baseline, activeSession);
         showComparisonPanel(
@@ -1459,6 +1469,7 @@ export function activate(context: vscode.ExtensionContext): void {
       activeInvestigationId = undefined;
       diagnostics.clear();
       findingDiagnostics.clear();
+      loadedRawProfileIds.clear();
       for (const editor of vscode.window.visibleTextEditors) {
         editor.setDecorations(heatDecoration, []);
         editor.setDecorations(heatLabelDecoration, []);
@@ -1670,7 +1681,7 @@ export function activate(context: vscode.ExtensionContext): void {
       selectedType = selected.sampleType;
     }
     const session = parseProfile(bytes, name, source, selectedType);
-    pprofViewer.registerProfile(session.id, bytes);
+    registerRawProfile(session.id, bytes);
     return session;
   }
 
@@ -1733,7 +1744,7 @@ export function activate(context: vscode.ExtensionContext): void {
         session.scenarioId = currentInvestigation()?.scenarioId;
         return session;
       });
-      pprofViewer.registerProfile(captured.map((session) => session.id), bytes);
+      registerRawProfile(captured.map((session) => session.id), bytes);
       captured.forEach((session) => addSession(session, false, investigationId));
       const primary = captured[0];
       if (primary) {
@@ -1770,11 +1781,6 @@ export function activate(context: vscode.ExtensionContext): void {
         snapshot,
         (file, line) => void openSource(file, line, heatDecoration, heatLabelDecoration, false)
       );
-      if (snapshot.suspiciousCount > 0) {
-        void vscode.window.showWarningMessage(
-          `GoTune: ${snapshot.suspiciousCount} goroutine(s) remained in suspicious blocking stacks.`
-        );
-      }
     } catch (error) {
       void vscode.window.showErrorMessage(`GoTune: ${errorMessage(error)}`);
     }
@@ -1942,7 +1948,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (baseline) heaps.push(baseline);
     if (baselineObjects) heapObjects.push(baselineObjects);
     const start = await vscode.window.showInformationMessage(
-      `GoTune: Run the suspected leaking operation during the next ${seconds} seconds.`,
+      `GoTune: Run the suspected memory-growth operation during the next ${seconds} seconds.`,
       { modal: true },
       'Start round 1'
     );
@@ -2425,7 +2431,6 @@ export function activate(context: vscode.ExtensionContext): void {
                 if (!snapshot) return;
                 runtimeMetrics.goroutine_count = snapshot.total;
                 runtimeMetrics.goroutine_growth = snapshot.totalGrowth;
-                runtimeMetrics.suspicious_goroutines = snapshot.suspiciousCount;
               })
           );
         }
@@ -2653,7 +2658,7 @@ export function activate(context: vscode.ExtensionContext): void {
         'cpu'
       );
       annotateBenchmarkSession(session, scenario, capturedAt);
-      pprofViewer.registerProfile(session.id, result.cpuProfile);
+      registerRawProfile(session.id, result.cpuProfile);
       captures.push(session);
       addSession(session, false);
     }
@@ -2665,7 +2670,7 @@ export function activate(context: vscode.ExtensionContext): void {
         'alloc_space'
       );
       annotateBenchmarkSession(session, scenario, capturedAt);
-      pprofViewer.registerProfile(session.id, result.memoryProfile);
+      registerRawProfile(session.id, result.memoryProfile);
       captures.push(session);
       addSession(session, false);
     }
@@ -2920,6 +2925,20 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       const baseline = sessions.find((session) => session.id === baselineId);
       if (!baseline || baseline.id === capture.id) continue;
+      if (!pprofViewer.hasProfile(baseline.id)) {
+        updated.baselineByMetric[key] = capture.id;
+        verificationFindings.push({
+          id: `verification-${capture.id}-baseline-reset`,
+          investigationId,
+          captureId: capture.id,
+          kind: profileEvidenceKind(capture.sampleType),
+          severity: 'info',
+          title: 'Function baseline recaptured',
+          detail: 'The previous raw profile was unavailable after restart, so no function-level delta was computed. This capture is the new raw baseline.',
+          createdAt: Date.now()
+        });
+        continue;
+      }
       try {
         verificationFindings.push(...findingsFromComparison(
           investigationId,
@@ -3003,6 +3022,15 @@ export function activate(context: vscode.ExtensionContext): void {
       return;
     }
     baseline = savedBaseline;
+    if (!pprofViewer.hasProfile(baseline.id)) {
+      const baselineByMetric = { ...investigation.baselineByMetric };
+      delete baselineByMetric[key];
+      replaceInvestigation({ ...investigation, baselineByMetric, updatedAt: Date.now() });
+      void vscode.window.showInformationMessage(
+        'GoTune: The raw baseline profile is unavailable after restart. Run Verify Current Function again to capture a fresh baseline.'
+      );
+      return;
+    }
     if (!await restartTargetForVerification()) return;
     if (
       baseline.target
@@ -3213,7 +3241,7 @@ export function activate(context: vscode.ExtensionContext): void {
             switched.processStartedAt = session.processStartedAt;
             switched.captureMode = session.captureMode;
             switched.scenarioId = session.scenarioId;
-            pprofViewer.registerProfile(switched.id, bytes);
+            registerRawProfile(switched.id, bytes);
             addSession(switched, false);
             setActive(switched);
             return switched;
@@ -3490,35 +3518,6 @@ async function structAtDocumentPosition(
   return undefined;
 }
 
-async function applySafeStructLayout(
-  uri: vscode.Uri,
-  inspectedVersion: number,
-  optimizedSource?: string
-): Promise<void> {
-  if (!optimizedSource) return;
-  const document = await vscode.workspace.openTextDocument(uri);
-  if (document.isDirty || document.version !== inspectedVersion) {
-    void vscode.window.showWarningMessage(
-      'GoTune: The source changed after layout inspection. Inspect the struct again before applying.'
-    );
-    return;
-  }
-  const edit = new vscode.WorkspaceEdit();
-  edit.replace(
-    uri,
-    new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)),
-    optimizedSource
-  );
-  if (!await vscode.workspace.applyEdit(edit)) {
-    throw new Error('VS Code could not apply the safe struct layout');
-  }
-  const updated = await vscode.workspace.openTextDocument(uri);
-  await vscode.window.showTextDocument(updated, { preview: false });
-  void vscode.window.showInformationMessage(
-    'GoTune: Applied the verified field reorder. Review and run the same benchmark scenario.'
-  );
-}
-
 async function openSource(
   filename: string,
   line: number,
@@ -3743,7 +3742,7 @@ function activeBaselineSessionIds(): string[] {
   return [...new Set([
     ...(baselineSessionId ? [baselineSessionId] : []),
     ...Object.values(investigation?.baselineByMetric ?? {})
-  ])];
+  ])].filter((id) => loadedRawProfileIds.has(id));
 }
 
 function functionEvidenceSummary(
@@ -3847,18 +3846,14 @@ function benchmarkFindings(
       benchmarkMetricDelta('B/op', before?.bytesPerOp, measurement.bytesPerOp),
       benchmarkMetricDelta('allocs/op', before?.allocsPerOp, measurement.allocsPerOp)
     ].filter((value): value is { text: string; percent: number } => Boolean(value));
-    const worst = Math.max(0, ...metrics.map((metric) => metric.percent));
-    const best = Math.min(0, ...metrics.map((metric) => metric.percent));
     return {
       id: `benchmark-${current.capturedAt}-${measurement.name}`,
       investigationId,
       kind: 'cpu',
-      severity: worst >= 5 ? 'suspicious' : best <= -5 ? 'verified' : 'info',
-      title: worst >= 5
-        ? `${measurement.name} regressed`
-        : best <= -5 ? `${measurement.name} improved` : `${measurement.name} is stable`,
+      severity: 'info',
+      title: `${measurement.name} benchmark delta`,
       detail: metrics.length > 0
-        ? metrics.map((metric) => metric.text).join(' · ')
+        ? `${metrics.map((metric) => metric.text).join(' · ')} · median differences only; no statistical significance inferred.`
         : 'No matching baseline measurement was available.',
       functionName: measurement.name.replace(/^Benchmark/, ''),
       createdAt: current.capturedAt
@@ -3890,22 +3885,15 @@ function scenarioMetricFindings(
     if (before === undefined) return [];
     const delta = after - before;
     const percent = before === 0 ? undefined : delta / Math.abs(before) * 100;
-    const lowerIsBetter = /(?:latency|p\d+|error|cpu|alloc|heap|memory|mutex|block|goroutine|gc)/i.test(name);
-    const directionalChange = percent ?? (delta === 0 ? 0 : Math.sign(delta) * 100);
-    const improvement = lowerIsBetter ? -directionalChange : directionalChange;
     return [{
       id: `scenario-metric-${current.id}-${name}`,
       investigationId,
       kind: scenarioMetricEvidenceKind(name),
-      severity: improvement >= 5
-        ? 'verified' as const
-        : improvement <= -5 ? 'suspicious' as const : 'info' as const,
-      title: improvement >= 5
-        ? `${name} improved`
-        : improvement <= -5 ? `${name} regressed` : `${name} is stable`,
+      severity: 'info' as const,
+      title: `${name} metric delta`,
       detail: `${before.toLocaleString()} → ${after.toLocaleString()}${percent === undefined
         ? ''
-        : ` (${percent > 0 ? '+' : ''}${percent.toFixed(1)}%)`}`,
+        : ` (${percent > 0 ? '+' : ''}${percent.toFixed(1)}%)`} · direction and acceptable threshold are not configured.`,
       createdAt: current.finishedAt
     }];
   });

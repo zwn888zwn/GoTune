@@ -80,12 +80,12 @@ test('creates source findings from persistent memory growth', () => {
     }]
   }, 500);
 
-  assert.equal(findings[0].severity, 'suspicious');
+  assert.equal(findings[0].severity, 'info');
   assert.equal(findings[0].location.line, 12);
-  assert.match(findings[0].detail, /50 B growth/);
+  assert.match(findings[0].detail, /first-to-last delta 50 B/);
 });
 
-test('creates a suspicious source finding from stable blocked goroutines', () => {
+test('creates an informational source finding from sampled blocked goroutines', () => {
   const findings = findingsFromGoroutines('investigation', {
     capturedAt: 1,
     total: 8,
@@ -101,12 +101,12 @@ test('creates a suspicious source finding from stable blocked goroutines', () =>
       frames: [{ functionName: 'main.submit', file: '/workspace/main.go', line: 20 }],
       representative: '',
       stableCaptures: 3,
-      severity: 'suspicious',
+      severity: 'watch',
       explanation: 'The same stack remained blocked.'
     }]
   }, 600);
 
-  assert.equal(findings[0].severity, 'suspicious');
+  assert.equal(findings[0].severity, 'info');
   assert.equal(findings[0].location.line, 20);
   const investigation = createInvestigation('blocking', 'example/app', 100);
   const updated = addFindingsToInvestigation(investigation, findings, 'goroutine-', 700);
@@ -134,7 +134,7 @@ test('maps goroutine findings to a workspace frame instead of runtime internals'
       ],
       representative: 'stack',
       stableCaptures: 3,
-      severity: 'suspicious',
+      severity: 'watch',
       explanation: 'stable'
     }]
   }, 2, (file) => file.startsWith('/workspace/'));
@@ -142,7 +142,7 @@ test('maps goroutine findings to a workspace frame instead of runtime internals'
   assert.deepEqual(findings[0].location, { file: '/workspace/queue.go', line: 42 });
 });
 
-test('turns before-after profile changes into verification findings', () => {
+test('reports before-after profile changes as raw deltas', () => {
   const findings = findingsFromComparison('investigation', {
     baseline: session('cpu'),
     current: { ...session('cpu'), id: 'after', name: 'after' },
@@ -160,8 +160,8 @@ test('turns before-after profile changes into verification findings', () => {
     }]
   }, 800);
 
-  assert.equal(findings[0].severity, 'verified');
-  assert.match(findings[0].title, /Improved/);
+  assert.equal(findings[0].severity, 'info');
+  assert.match(findings[0].title, /Profile delta/);
 });
 
 test('ranks the optimization target and actionable source findings first', () => {

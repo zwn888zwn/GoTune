@@ -2,9 +2,9 @@
 
 GoTune is a source-centered Go performance debugger for VS Code. Start from
 the function under the cursor, search globally for a bottleneck, or describe
-a known problem. GoTune turns pprof and runtime trace evidence into findings
-beside the code, then reruns the same workload to verify whether a change
-helped.
+a known problem. GoTune maps pprof and runtime trace evidence back to source,
+then reruns the same workload to compare the recorded values without treating
+a sampled difference as a performance verdict.
 
 ```text
 Analyze current function, find global bottlenecks, or choose a known problem
@@ -12,7 +12,7 @@ Analyze current function, find global bottlenecks, or choose a known problem
 → findings open the exact source and next action
 → edit the code
 → rerun the same scenario
-→ compare runtime and business outcomes
+→ compare raw runtime and business outcomes
 ```
 
 The default sidebar contains only Analyze and Findings. Raw profiles, manual
@@ -32,7 +32,7 @@ combine all evidence in the active Investigation:
 - timed allocation bytes and object counts
 - live bytes and object counts attributed to the allocation path
 - block, mutex, network, syscall, and scheduler waiting
-- Goroutine growth and stable blocking Findings
+- repeated Goroutine counts, states, and source stacks
 - primary caller and expensive callees
 - matching scenario baseline delta
 
@@ -69,9 +69,9 @@ Heap baseline, timed allocation delta, repeated Goroutine stacks, and two
 more post-GC Heap snapshots. Blocking uses repeated Goroutine progress plus
 Mutex and Block profiles when contention sampling is enabled.
 
-Findings deliberately say “suspicious” or “possible” where pprof cannot prove
-a deadlock or object owner. Normal stable I/O waits are not reported as
-errors. From a blocking Finding, **Find related channel or lock code** uses
+Repeated Goroutine stacks are reported as sampled states and count changes,
+not as deadlock, leak, or progress conclusions. From a blocking observation,
+**Find related channel or lock code** uses
 the Go language server's real symbol references to list senders, receivers,
 lock/unlock sites, and wait/signal sites.
 
@@ -105,9 +105,9 @@ A Performance Scenario stores:
 - Git commit, tracked dirty state, and diff summary
 
 The first run establishes the baseline. Later runs reuse the same conditions
-and produce improvement/regression Findings. Baseline Profile sessions are
-preserved across VS Code restarts instead of being evicted with ordinary
-history. Every run automatically records comparable runtime outcomes such as
+and report raw before/after differences. Scenario records are preserved across
+VS Code restarts; raw pprof artifacts are memory-only, so function-level
+profile comparison requires recapture after restart. Every run records runtime outcomes such as
 sampled CPU, allocated bytes and objects, post-GC live-heap/object growth,
 Mutex/Block delay, and Goroutine growth alongside business metrics. A scenario
 that requests contention evidence also starts its target with contention
@@ -122,8 +122,9 @@ Business metrics can come from:
 - native Go Benchmark output
 
 Go Benchmark scenarios run repeated `go test -bench -benchmem` samples,
-aggregate `ns/op`, `B/op`, and `allocs/op`, and attach CPU plus allocation
-Profiles to the same source investigation.
+report median `ns/op`, `B/op`, and `allocs/op` differences without claiming
+statistical significance, and attach CPU plus allocation Profiles to the same
+source investigation.
 
 ## Execution trace
 
@@ -138,14 +139,13 @@ ordering or application regions matter.
 ## Struct layout
 
 Run **GoTune: Inspect Struct Memory Layout** with the cursor in a struct.
-The bundled Go helper uses `go/types` and the configured GOARCH to show field
-offsets, size, alignment, padding, an optimized order, and estimated savings.
-
-The automatic field reorder preserves comments and struct tags and is only
-offered when conservative safety checks pass. Exported structs, unkeyed
-literals, embedded/grouped fields, `unsafe.Offsetof`, cgo, generated code,
-and packages with order-sensitive serialization dependencies are preview
-only.
+The bundled Go helper uses the active package build constraints, `go/types`,
+and the configured GOARCH to show raw field offsets, size, alignment, and
+padding. It also displays a candidate order produced by a deterministic
+alignment/size sort, but does not treat that order as an optimization verdict
+or modify source code. Cache-line behavior, access frequency, false sharing,
+GC scan cost, instance count, and real performance impact are outside this
+static layout calculation.
 
 ## Remote and production profiles
 

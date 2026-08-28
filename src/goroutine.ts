@@ -84,7 +84,7 @@ export class GoroutineTracker {
         initialCount
       });
       const first = entries[0];
-      const severity = classifySeverity(first.state, stableCaptures, entries.length, countGrowth);
+      const severity = classifySeverity(first.state);
       return {
         signature,
         state: first.state,
@@ -150,27 +150,20 @@ export function parseGoroutineDump(text: string): GoroutineInfo[] {
 }
 
 export function assessGoroutineSnapshot(snapshot: GoroutineSnapshot): GoroutineAssessment {
-  const suspicious = snapshot.groups.filter((group) => group.severity === 'suspicious');
-  const growing = suspicious.filter((group) => group.countGrowth > 0);
+  const watched = snapshot.groups.filter((group) => group.severity === 'watch');
+  const growing = watched.filter((group) => group.countGrowth > 0);
   if (growing.length > 0) {
     return {
       kind: 'growth',
-      title: 'Goroutine growth on stable blocking stacks',
-      detail: `${growing.reduce((sum, group) => sum + group.countGrowth, 0)} additional goroutine(s) appeared on unchanged synchronization stacks. This is leak or stalled-operation evidence, not proof of a deadlock.`
+      title: 'Blocking-stack count increased',
+      detail: `${growing.reduce((sum, group) => sum + group.countGrowth, 0)} additional goroutine(s) were present on matching blocking stacks compared with the first capture. This is a sampled count change, not a stall or leak conclusion.`
     };
   }
-  if (suspicious.length > 0) {
-    return {
-      kind: 'possible-stall',
-      title: 'Possible logical stall',
-      detail: `${snapshot.suspiciousCount} goroutine(s) remained on unchanged channel or lock stacks. Confirm that the business operation stopped making progress before calling this a deadlock.`
-    };
-  }
-  if (snapshot.groups.some((group) => group.severity === 'watch')) {
+  if (watched.length > 0) {
     return {
       kind: 'needs-more-samples',
-      title: 'Transient wait or early contention signal',
-      detail: 'Some synchronization stacks need more repeated samples. The current evidence does not establish a stall.'
+      title: 'Blocking states observed',
+      detail: `${watched.reduce((sum, group) => sum + group.count, 0)} goroutine(s) were sampled in channel or synchronization waits. Repeated stack samples alone do not establish whether the owning operation is making progress.`
     };
   }
   const waiting = snapshot.groups.reduce((sum, group) => sum + group.count, 0);
@@ -181,13 +174,13 @@ export function assessGoroutineSnapshot(snapshot: GoroutineSnapshot): GoroutineA
     return {
       kind: 'normal-io',
       title: 'Mostly normal I/O waiting',
-      detail: `${ioWaiting} of ${waiting} sampled goroutines are waiting for network or file I/O, with no stable suspicious synchronization stack.`
+      detail: `${ioWaiting} of ${waiting} sampled goroutines are waiting for network or file I/O; no channel or synchronization-wait group was selected for review.`
     };
   }
   return {
     kind: 'normal',
-    title: 'No stable blocking pattern found',
-    detail: 'Repeated samples did not identify a growing or unchanged suspicious synchronization stack.'
+    title: 'No configured blocking state observed',
+    detail: 'The sampled stacks did not match the current channel or synchronization-wait review filter.'
   };
 }
 
@@ -215,7 +208,9 @@ function normalizeFunction(value: string): string {
 }
 
 function goroutineSignature(goroutine: GoroutineInfo): string {
-  return `${goroutine.state}\n${goroutine.frames.map((frame) => frame.functionName).join('\n')}`;
+  return `${goroutine.state}\n${goroutine.waitDetail ?? ''}\n${goroutine.frames
+    .map((frame) => `${frame.functionName}@${frame.file ?? ''}:${frame.line ?? 0}`)
+    .join('\n')}`;
 }
 
 function isGoTuneGoroutine(goroutine: GoroutineInfo): boolean {
@@ -223,17 +218,11 @@ function isGoTuneGoroutine(goroutine: GoroutineInfo): boolean {
     || goroutine.frames[0]?.functionName === 'runtime/pprof.writeGoroutineStacks';
 }
 
-function classifySeverity(
-  state: string,
-  stableCaptures: number,
-  count: number,
-  countDelta: number
-): GoroutineSeverity {
+function classifySeverity(state: string): GoroutineSeverity {
   if (/^(?:running|runnable|IO wait|sleep|GC worker|force gc)/i.test(state)) {
-    return countDelta > 0 && stableCaptures >= 2 ? 'watch' : 'normal';
+    return 'normal';
   }
   const blocking = /chan (?:receive|send)|semacquire|sync\.Mutex|select|sync\.Cond|WaitGroup/i.test(state);
-  if (blocking && stableCaptures >= 2 && (countDelta > 0 || count >= 2 || stableCaptures >= 3)) return 'suspicious';
   return blocking ? 'watch' : 'normal';
 }
 
@@ -242,21 +231,17 @@ function severityExplanation(
   severity: GoroutineSeverity,
   stableCaptures: number,
   count: number,
-  countDelta: number
+  countGrowth: number
 ): string {
-  if (severity === 'suspicious') {
-    const growth = countDelta > 0 ? ` and grew by ${countDelta}` : '';
-    return `${count} goroutine(s) stayed in ${state} for ${stableCaptures} consecutive captures${growth}; verify that the owning operation still makes progress.`;
-  }
   if (severity === 'watch') {
-    if (countDelta > 0) {
-      return `${state} grew by ${countDelta} goroutine(s); repeat the same workload and confirm whether the count returns.`;
+    if (countGrowth > 0) {
+      return `${state} had ${countGrowth} more goroutine(s) than the first capture on the same source stack.`;
     }
-    return `${state} can be normal, but repeated unchanged captures may indicate a blocked channel or lock.`;
+    return `${count} goroutine(s) were sampled in ${state} on the same source stack for ${stableCaptures} capture(s); this can be normal.`;
   }
   if (/IO wait/i.test(state)) return 'Waiting for network or file I/O; normally expected in servers.';
   if (/running|runnable/i.test(state)) return 'Currently running or ready to run.';
-  return `${state} is not considered suspicious from a single snapshot.`;
+  return `${state} was recorded as raw runtime state and was not selected by the blocking-state review filter.`;
 }
 
 function severityRank(severity: GoroutineSeverity): number {
