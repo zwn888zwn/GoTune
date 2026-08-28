@@ -273,12 +273,14 @@ export function activate(context: vscode.ExtensionContext): void {
   const runningProvider = new PerformanceTreeProvider<vscode.TreeItem>(() =>
     runningItems(runner.snapshot, cpuRecordingStartedAt)
   );
-  const sessionProvider = new PerformanceTreeProvider(() => sessions.map((session) => {
-    const state = session.id === baselineSessionId
-      ? 'baseline'
-      : session.id === activeSession?.id ? 'current' : 'normal';
-    return new SessionItem(session, state);
-  }));
+  const sessionProvider = new PerformanceTreeProvider(() => sessions
+    .filter((session) => pprofViewer.hasProfile(session.id))
+    .map((session) => {
+      const state = session.id === baselineSessionId
+        ? 'baseline'
+        : session.id === activeSession?.id ? 'current' : 'normal';
+      return new SessionItem(session, state);
+    }));
   const investigationProvider = new PerformanceTreeProvider(() =>
     investigationItems(currentInvestigation())
   );
