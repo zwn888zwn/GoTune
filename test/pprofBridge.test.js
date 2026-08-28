@@ -93,6 +93,12 @@ test('injects a non-invasive IDE bridge into official pprof HTML', () => {
   );
   assert.match(bridged, /host\(\{ command: 'selected-function', functionName: '' \}\)/);
   assert.match(bridged, /gotune-related/);
+  assert.match(bridged, /const graphNodeForKey/);
+  assert.match(bridged, /centerGraphNode\(node\)/);
+  assert.doesNotMatch(bridged, /centerGraphNode\(graphFunction\(node\)\)/);
+  assert.match(bridged, /message\.command === 'focus-node'/);
+  assert.match(bridged, /路径 ' \+ index \+ '\/' \+ total/);
+  assert.doesNotMatch(bridged, /results\.includes\(name\)/);
   assert.match(bridged, /search-results/);
   assert.match(bridged, /searchGraph/);
   assert.match(bridged, /searchFlame/);
@@ -123,4 +129,14 @@ test('ignores stale iframe readiness from a different pprof view', () => {
   const viewer = fs.readFileSync(require.resolve('../out/pprofViewer'), 'utf8');
   assert.match(viewer, /view==='graph'\?model\.graphPath/);
   assert.match(viewer, /if\(message\.path!==viewPath\(currentView\)\)return/);
+});
+
+test('keeps call-tree node identities and focuses sampled functions without expanding the whole graph', () => {
+  const viewer = fs.readFileSync(require.resolve('../out/pprofViewer'), 'utf8');
+  assert.match(viewer, /command:'focus-node',nodeKey:result\.key/);
+  assert.match(viewer, /if\(graphFocusFilter\)params\.set\('f',graphFocusFilter\)/);
+  assert.match(viewer, /graphFocusFilter=exactGraphPattern\(message\.functionName\)/);
+  assert.match(viewer, /已采样，但 pprof 调用图无法定位该节点/);
+  assert.doesNotMatch(viewer, /graphNodeCount=Math\.max\(graphNodeCount,500\)/);
+  assert.doesNotMatch(viewer, /new Set\(message\.results/);
 });

@@ -330,7 +330,10 @@ function pprofBridgeScript(): string {
     });
     return matches.length === 1 ? matches[0] : undefined;
   };
-  const graphNodeKey = (node) => node?.querySelector(':scope > title')?.textContent?.trim() || '';
+  const graphNodeKey = (node) => node?.querySelector(':scope > title')?.textContent?.trim()
+    || node?.id || '';
+  const graphNodeForKey = (key) => [...document.querySelectorAll('#graph g.node')]
+    .find((node) => graphNodeKey(node) === key);
   const clearGraphFocus = () => {
     document.querySelectorAll('#graph g.node,#graph g.edge').forEach((item) => {
       item.classList.remove('gotune-target', 'gotune-related', 'gotune-dim');
@@ -363,7 +366,7 @@ function pprofBridgeScript(): string {
       edge.classList.toggle('gotune-dim', !relatedEdges.has(edge));
     }
     node.classList.add('gotune-target');
-    centerGraphNode(graphFunction(node));
+    centerGraphNode(node);
     return true;
   };
   const compileSearch = (query) => {
@@ -377,18 +380,44 @@ function pprofBridgeScript(): string {
   };
   const searchGraph = (query) => {
     const expression = compileSearch(String(query || '').trim());
-    const results = [];
+    const nodes = [...document.querySelectorAll('#graph g.node')];
+    const nodeNames = new Map(nodes.map((node) => [graphNodeKey(node), graphFunction(node)]));
+    const callers = new Map();
+    for (const edge of document.querySelectorAll('#graph g.edge')) {
+      const title = edge.querySelector(':scope > title')?.textContent?.trim() || '';
+      const parts = title.split('->').map((part) => part.trim());
+      const caller = parts.length === 2 ? nodeNames.get(parts[0]) : undefined;
+      if (!caller) continue;
+      const names = callers.get(parts[1]) || [];
+      if (!names.includes(caller)) names.push(caller);
+      callers.set(parts[1], names);
+    }
+    const matches = [];
     document.querySelectorAll('#graph g.node.gotune-search-match')
       .forEach((item) => item.classList.remove('gotune-search-match'));
     if (expression) {
-      for (const node of document.querySelectorAll('#graph g.node')) {
+      for (const node of nodes) {
         const name = graphFunction(node);
         if (name && expression.test(name)) {
           node.classList.add('gotune-search-match');
-          if (!results.includes(name)) results.push(name);
+          matches.push({ key: graphNodeKey(node), name });
         }
       }
     }
+    const counts = new Map();
+    for (const match of matches) counts.set(match.name, (counts.get(match.name) || 0) + 1);
+    const indexes = new Map();
+    const results = matches.map((match) => {
+      const total = counts.get(match.name) || 1;
+      if (total === 1) return { ...match, label: match.name };
+      const index = (indexes.get(match.name) || 0) + 1;
+      indexes.set(match.name, index);
+      const context = (callers.get(match.key) || []).join(', ');
+      return {
+        ...match,
+        label: (context ? context + ' → ' : '') + match.name + ' · 路径 ' + index + '/' + total
+      };
+    });
     host({ command: 'search-results', view: 'graph', query: String(query || ''), results });
     return results;
   };
@@ -413,9 +442,8 @@ function pprofBridgeScript(): string {
     box.x = centerX - box.width / 2;
     box.y = centerY - box.height / 2;
   };
-  const centerGraphNode = (functionName) => {
+  const centerGraphNode = (node) => {
     const svg = graphSvg();
-    const node = graphNodeFor(functionName);
     if (!svg || !node) return false;
     rememberGraphViewBox();
     document.querySelectorAll('#graph g.node.gotune-target')
@@ -629,6 +657,11 @@ function pprofBridgeScript(): string {
     }
     if (message.command === 'flame-reset') {
       setFlamePivot('');
+      return;
+    }
+    if (message.command === 'focus-node' && graphSvg()) {
+      const node = graphNodeForKey(String(message.nodeKey || ''));
+      if (node) focusGraphNode(node);
       return;
     }
     if (message.command === 'focus-function' || message.command === 'search') {

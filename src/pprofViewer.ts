@@ -542,6 +542,7 @@ function viewerHtml(
     let graphNodeFraction = model.graphNodeFraction;
     let graphEdgeFraction = model.graphEdgeFraction;
     let graphCallTree = model.graphCallTree;
+    let graphFocusFilter = '';
     let graphLocateExpanded = false;
     let graphSearchResults = [];
     let graphSearchIndex = -1;
@@ -592,9 +593,11 @@ function viewerHtml(
         params.set('nf',String(graphNodeFraction));
         params.set('ef',String(graphEdgeFraction));
         if(graphCallTree)params.set('calltree','true');
+        if(graphFocusFilter)params.set('f',graphFocusFilter);
       }
       return model.proxyUrl + viewPath(currentView) + '?' + params.toString();
     };
+    const exactGraphPattern = value => '^'+String(value).replace(/([\\.?+*\[\](){}|^$])/g,'\\$1')+'$';
     const sendFrameState = () => {
       frame.contentWindow?.postMessage({source:'gotune-host',command:'theme',colors},'*');
       frame.contentWindow?.postMessage({
@@ -620,19 +623,19 @@ function viewerHtml(
     const selectGraphSearchResult = index => {
       if(graphSearchResults.length===0)return;
       graphSearchIndex=(index+graphSearchResults.length)%graphSearchResults.length;
-      const name=graphSearchResults[graphSearchIndex];
-      choose(name);
-      vscode.postMessage({command:'selected-function',functionName:name});
-      focus(name);
+      const result=graphSearchResults[graphSearchIndex];
+      choose(result.name);
+      vscode.postMessage({command:'selected-function',functionName:result.name});
+      frame.contentWindow?.postMessage({source:'gotune-host',command:'focus-node',nodeKey:result.key},'*');
       searchResults.querySelectorAll('.search-result').forEach((item,rowIndex)=>item.classList.toggle('active',rowIndex===graphSearchIndex));
     };
     const renderGraphSearchResults = () => {
       searchResults.textContent='';
-      graphSearchResults.forEach((name,index)=>{
+      graphSearchResults.forEach((result,index)=>{
         const button=document.createElement('button');
         button.className='search-result';
-        button.textContent=name;
-        button.title=name;
+        button.textContent=result.label||result.name;
+        button.title=result.label||result.name;
         button.addEventListener('click',()=>selectGraphSearchResult(index));
         searchResults.appendChild(button);
       });
@@ -742,7 +745,9 @@ function viewerHtml(
         else if(message.command==='open-function'||message.command==='open-source')vscode.postMessage(message);
         else if(message.command==='search-results'&&message.view===currentView){
           if(currentView==='graph'){
-            graphSearchResults=[...new Set(message.results||[])];
+            graphSearchResults=(Array.isArray(message.results)?message.results:[]).filter(result=>
+              result&&typeof result.key==='string'&&typeof result.name==='string'
+            );
             graphSearchIndex=-1;
             renderGraphSearchResults();
           }else if(currentView==='flame'){
@@ -762,13 +767,11 @@ function viewerHtml(
         else if(message.command==='focus-missed'&&currentView==='graph'){
           if(!graphLocateExpanded){
             graphLocateExpanded=true;
-            graphNodeCount=Math.max(graphNodeCount,500);
-            graphNodeFraction=0;
-            graphEdgeFraction=0;
+            graphFocusFilter=exactGraphPattern(message.functionName);
             pendingFocus=true;
-            selection.textContent=message.functionName+' · 正在展开调用图定位';
+            selection.textContent=message.functionName+' · 正在聚焦对应调用路径';
             frame.src=iframeUrl();
-          }else selection.textContent=message.functionName+' · 本次 Profile 没有可定位的图节点';
+          }else selection.textContent=message.functionName+' · 已采样，但 pprof 调用图无法定位该节点';
         }
       }else if(message?.command==='focus-function'){choose(message.functionName);pendingFocus=false;if(currentView==='tree'){revealTreeSelection();renderTree()}else if(currentView==='peek'||currentView==='source')frame.src=iframeUrl();else focus(message.functionName)}
       else if(message?.command==='selection')choose(message.functionName);
@@ -794,7 +797,7 @@ function viewerHtml(
       graphNodeFraction=Math.max(0,Math.min(1,Number(configNodeFraction.value)||0));
       graphEdgeFraction=Math.max(0,Math.min(1,Number(configEdgeFraction.value)||0));
       graphCallTree=configCallTree.checked;
-      graphLocateExpanded=false;configPanel.hidden=true;pendingFocus=false;
+      graphFocusFilter='';graphLocateExpanded=false;configPanel.hidden=true;pendingFocus=false;
       vscode.postMessage({command:'change-graph-config',nodeCount:graphNodeCount,nodeFraction:graphNodeFraction,edgeFraction:graphEdgeFraction,callTree:graphCallTree});
       frame.src=iframeUrl();
     });
