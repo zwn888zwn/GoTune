@@ -106,8 +106,11 @@ A Performance Scenario stores:
 
 The first run establishes the baseline. Later runs reuse the same conditions
 and report raw before/after differences. Scenario records are preserved across
-VS Code restarts; raw pprof artifacts are memory-only, so function-level
-profile comparison requires recapture after restart. Every run records runtime outcomes such as
+VS Code restarts. Raw pprof artifacts are saved in the extension's workspace
+storage so retained profiles and function-level comparisons can be reopened.
+On startup, artifacts outside the retained session history are removed. Older
+profiles captured before this storage was available require reimport or recapture.
+Every run records runtime outcomes such as
 sampled CPU, allocated bytes and objects, post-GC live-heap/object growth,
 Mutex/Block delay, and Goroutine growth alongside business metrics. A scenario
 that requests contention evidence also starts its target with contention

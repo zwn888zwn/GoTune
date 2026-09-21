@@ -219,7 +219,7 @@ class FunctionEvidenceCodeActionProvider implements vscode.CodeActionProvider {
   }
 }
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const savedSessions = context.workspaceState.get<ProfileSession[]>(sessionsStorageKey, []);
   sessions.splice(0, sessions.length, ...savedSessions.filter(isProfileSession));
   baselineSessionId = context.workspaceState.get<string>(baselineStorageKey);
@@ -260,9 +260,21 @@ export function activate(context: vscode.ExtensionContext): void {
   const targetOutput = vscode.window.createOutputChannel('GoTune Target');
   const runner = new ProfilerRunner(targetOutput);
   const traceViewer = new TraceViewer(targetOutput);
-  const pprofViewer = new PprofViewer(targetOutput);
-  const registerRawProfile = (sessionIds: string | string[], bytes: Buffer): void => {
-    pprofViewer.registerProfile(sessionIds, bytes);
+  const pprofViewer = new PprofViewer(
+    targetOutput,
+    context.storageUri ? path.join(context.storageUri.fsPath, 'profiles') : undefined
+  );
+  await pprofViewer.restoreProfiles(sessions);
+  loadedRawProfileIds.clear();
+  for (const session of sessions) {
+    if (pprofViewer.hasProfile(session.id)) loadedRawProfileIds.add(session.id);
+  }
+  const registerRawProfile = async (sessionIds: string | string[], bytes: Buffer): Promise<void> => {
+    try {
+      await pprofViewer.registerProfile(sessionIds, bytes);
+    } catch (error) {
+      void vscode.window.showWarningMessage(`GoTune: Profile is available for this session, but could not be saved: ${errorMessage(error)}`);
+    }
     for (const id of Array.isArray(sessionIds) ? sessionIds : [sessionIds]) {
       loadedRawProfileIds.add(id);
     }
@@ -622,7 +634,7 @@ export function activate(context: vscode.ExtensionContext): void {
         session.captureDurationMs = Date.now() - startedAt;
         session.captureMode = 'delta';
         session.scenarioId = currentInvestigation()?.scenarioId;
-        registerRawProfile(session.id, bytes);
+        await registerRawProfile(session.id, bytes);
         addSession(session, true);
         if (session.total === 0) {
           void vscode.window.showWarningMessage(
@@ -797,7 +809,7 @@ export function activate(context: vscode.ExtensionContext): void {
           session.captureDurationMs = seconds * 1000;
           session.captureMode = 'delta';
           session.scenarioId = currentInvestigation()?.scenarioId;
-          registerRawProfile(session.id, profile.bytes);
+          await registerRawProfile(session.id, profile.bytes);
           addSession(session, false);
           traceSessions.push({ kind: profile.kind, session });
         }
@@ -1447,7 +1459,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       if (!pprofViewer.hasProfile(baseline.id) || !pprofViewer.hasProfile(activeSession.id)) {
         void vscode.window.showInformationMessage(
-          'GoTune: Raw profile data is unavailable after restart. Re-import or recapture both profiles before comparing function-level deltas.'
+          'GoTune: A raw profile file is missing. Re-import or recapture it before comparing function-level deltas.'
         );
         return;
       }
@@ -1461,7 +1473,7 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showWarningMessage(`GoTune: ${errorMessage(error)}`);
       }
     }),
-    vscode.commands.registerCommand('gotune.clearSessions', () => {
+    vscode.commands.registerCommand('gotune.clearSessions', async () => {
       sessions.splice(0);
       investigations.splice(0);
       activeSession = undefined;
@@ -1474,7 +1486,11 @@ export function activate(context: vscode.ExtensionContext): void {
         editor.setDecorations(heatDecoration, []);
         editor.setDecorations(heatLabelDecoration, []);
       }
-      void pprofViewer.clear();
+      try {
+        await pprofViewer.clear();
+      } catch (error) {
+        void vscode.window.showWarningMessage(`GoTune: Could not remove saved profiles: ${errorMessage(error)}`);
+      }
       persist();
       updateContexts();
       runningProvider.refresh();
@@ -1681,7 +1697,7 @@ export function activate(context: vscode.ExtensionContext): void {
       selectedType = selected.sampleType;
     }
     const session = parseProfile(bytes, name, source, selectedType);
-    registerRawProfile(session.id, bytes);
+    await registerRawProfile(session.id, bytes);
     return session;
   }
 
@@ -1744,7 +1760,7 @@ export function activate(context: vscode.ExtensionContext): void {
         session.scenarioId = currentInvestigation()?.scenarioId;
         return session;
       });
-      registerRawProfile(captured.map((session) => session.id), bytes);
+      await registerRawProfile(captured.map((session) => session.id), bytes);
       captured.forEach((session) => addSession(session, false, investigationId));
       const primary = captured[0];
       if (primary) {
@@ -2658,7 +2674,7 @@ export function activate(context: vscode.ExtensionContext): void {
         'cpu'
       );
       annotateBenchmarkSession(session, scenario, capturedAt);
-      registerRawProfile(session.id, result.cpuProfile);
+      await registerRawProfile(session.id, result.cpuProfile);
       captures.push(session);
       addSession(session, false);
     }
@@ -2670,7 +2686,7 @@ export function activate(context: vscode.ExtensionContext): void {
         'alloc_space'
       );
       annotateBenchmarkSession(session, scenario, capturedAt);
-      registerRawProfile(session.id, result.memoryProfile);
+      await registerRawProfile(session.id, result.memoryProfile);
       captures.push(session);
       addSession(session, false);
     }
@@ -2934,7 +2950,7 @@ export function activate(context: vscode.ExtensionContext): void {
           kind: profileEvidenceKind(capture.sampleType),
           severity: 'info',
           title: 'Function baseline recaptured',
-          detail: 'The previous raw profile was unavailable after restart, so no function-level delta was computed. This capture is the new raw baseline.',
+          detail: 'The previous raw profile file was unavailable, so no function-level delta was computed. This capture is the new raw baseline.',
           createdAt: Date.now()
         });
         continue;
@@ -3027,7 +3043,7 @@ export function activate(context: vscode.ExtensionContext): void {
       delete baselineByMetric[key];
       replaceInvestigation({ ...investigation, baselineByMetric, updatedAt: Date.now() });
       void vscode.window.showInformationMessage(
-        'GoTune: The raw baseline profile is unavailable after restart. Run Verify Current Function again to capture a fresh baseline.'
+        'GoTune: The raw baseline profile file is unavailable. Run Verify Current Function again to capture a fresh baseline.'
       );
       return;
     }
@@ -3179,7 +3195,7 @@ export function activate(context: vscode.ExtensionContext): void {
   async function showSessionProfile(session: ProfileSession, focusedHotspot?: Hotspot): Promise<void> {
     if (!pprofViewer.hasProfile(session.id)) {
       void vscode.window.showInformationMessage(
-        'GoTune：原始 Profile 只在本次 VS Code 运行中保留，请重新采集或导入后再打开官方视图。'
+        'GoTune：找不到原始 Profile 文件，请重新采集或导入后再打开官方视图。'
       );
       return;
     }
@@ -3241,7 +3257,7 @@ export function activate(context: vscode.ExtensionContext): void {
             switched.processStartedAt = session.processStartedAt;
             switched.captureMode = session.captureMode;
             switched.scenarioId = session.scenarioId;
-            registerRawProfile(switched.id, bytes);
+            await registerRawProfile(switched.id, bytes);
             addSession(switched, false);
             setActive(switched);
             return switched;

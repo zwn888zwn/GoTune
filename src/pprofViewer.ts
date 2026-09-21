@@ -12,7 +12,7 @@ import {
   pprofGraphPath,
   pprofViewerUrl
 } from './pprofBridge';
-import { listProfileSampleTypes } from './profileParser';
+import { listProfileSampleTypes, parseProfile } from './profileParser';
 import { profileTreeRows } from './profileTree';
 import { shouldCreateProcessGroup, signalProcessTree } from './processTree';
 
@@ -53,8 +53,9 @@ export class PprofViewer implements vscode.Disposable, vscode.WebviewViewProvide
   private graphCallTree = false;
   private options: OpenOptions | undefined;
   private selectedFunction = '';
+  private storageOperation: Promise<void> = Promise.resolve();
 
-  constructor(private readonly output: Output) {}
+  constructor(private readonly output: Output, private readonly storageDirectory?: string) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
@@ -66,10 +67,55 @@ export class PprofViewer implements vscode.Disposable, vscode.WebviewViewProvide
     this.render();
   }
 
-  registerProfile(sessionIds: string | string[], bytes: Buffer): void {
+  async registerProfile(sessionIds: string | string[], bytes: Buffer): Promise<void> {
     const artifact = Buffer.from(bytes);
-    for (const sessionId of Array.isArray(sessionIds) ? sessionIds : [sessionIds]) {
+    const ids = Array.isArray(sessionIds) ? sessionIds : [sessionIds];
+    for (const sessionId of ids) {
       this.artifacts.set(sessionId, artifact);
+    }
+    const directory = this.storageDirectory;
+    if (!directory) return;
+    const write = this.storageOperation.then(async () => {
+      await fs.mkdir(directory, { recursive: true });
+      for (const id of ids) {
+        await fs.writeFile(path.join(directory, `${encodeURIComponent(id)}.pb.gz`), artifact, { mode: 0o600 });
+      }
+    });
+    this.storageOperation = write.catch(() => {});
+    await write;
+  }
+
+  async restoreProfiles(sessions: ProfileSession[]): Promise<void> {
+    const directory = this.storageDirectory;
+    if (!directory) return;
+    const retained = new Set(sessions.map(session => `${encodeURIComponent(session.id)}.pb.gz`));
+    for (const session of sessions) {
+      try {
+        const bytes = await fs.readFile(path.join(directory, `${encodeURIComponent(session.id)}.pb.gz`));
+        const parsed = parseProfile(bytes, session.name, session.source, session.sampleType);
+        // Restore the complete evidence; workspace metadata deliberately trims large profiles.
+        session.hotspots = parsed.hotspots;
+        session.lineMetrics = parsed.lineMetrics;
+        session.callTree = parsed.callTree;
+        session.total = parsed.total;
+        session.sampleUnit = parsed.sampleUnit;
+        this.artifacts.set(session.id, bytes);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          this.output.appendLine(`[GoTune] Could not restore profile ${session.name}: ${String(error)}`);
+        }
+      }
+    }
+    try {
+      for (const name of await fs.readdir(directory)) {
+        if (name.endsWith('.pb.gz') && !retained.has(name)) {
+          await fs.unlink(path.join(directory, name));
+        }
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.output.appendLine(`[GoTune] Could not clean up old profiles: ${String(error)}`);
+      }
     }
   }
 
@@ -80,7 +126,7 @@ export class PprofViewer implements vscode.Disposable, vscode.WebviewViewProvide
   async open(options: OpenOptions): Promise<void> {
     const artifact = this.artifacts.get(options.session.id);
     if (!artifact) {
-      throw new Error('原始 Profile 只在本次 VS Code 运行中保留，请重新采集或导入后再打开。');
+      throw new Error('找不到原始 Profile 文件，请重新采集或导入后再打开。');
     }
     const changingProfile = this.options?.session.source !== options.session.source;
     this.options = options;
@@ -100,8 +146,17 @@ export class PprofViewer implements vscode.Disposable, vscode.WebviewViewProvide
   async clear(): Promise<void> {
     this.artifacts.clear();
     this.options = undefined;
-    await this.stopCurrent();
-    this.render();
+    const directory = this.storageDirectory;
+    const cleanup = this.storageOperation.then(async () => {
+      if (directory) await fs.rm(directory, { recursive: true, force: true });
+    });
+    this.storageOperation = cleanup.catch(() => {});
+    try {
+      await cleanup;
+    } finally {
+      await this.stopCurrent();
+      this.render();
+    }
   }
 
   dispose(): void {

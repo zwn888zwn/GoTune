@@ -89,6 +89,10 @@
         "icon": "$(run)"
       },
       {
+        "command": "gotune.runLaunchWithProfiler",
+        "title": "GoTune: 使用 launch.json 启动性能分析"
+      },
+      {
         "command": "gotune.stopProfilerTarget",
         "title": "GoTune: 停止分析目标",
         "icon": "$(debug-stop)"
@@ -165,12 +169,12 @@
       "view/item/context": [
         {
           "command": "gotune.setBaseline",
-          "when": "view == gotune.running && viewItem == gotuneSession",
+          "when": "view == gotune.sessions && viewItem == gotuneSession",
           "group": "gotune@1"
         },
         {
           "command": "gotune.compareWithBaseline",
-          "when": "view == gotune.running && viewItem == gotuneSession && gotune.hasBaseline",
+          "when": "view == gotune.sessions && viewItem == gotuneSession && gotune.hasBaseline",
           "group": "gotune@2"
         }
       ],

@@ -33,6 +33,7 @@ export function runningItems(
   if (snapshot.status === 'idle') {
     return [
       new RunningItem('启动当前 Go main', '自动注入 pprof 并运行当前 main 包', 'run', 'gotune.runWithProfiler'),
+      new RunningItem('使用 launch.json 启动', '复用运行参数和环境变量', 'debug-start', 'gotune.runLaunchWithProfiler'),
       new RunningItem('连接 pprof 服务', '分析已经运行的 Go 进程', 'plug', 'gotune.fetchProfile'),
       new RunningItem('导入 pprof 文件', '打开已有 CPU 或 Heap Profile', 'folder-opened', 'gotune.importProfile')
     ];
